@@ -1,0 +1,6 @@
+{
+  "name": "Smistamento Semiautomatico PT",
+  "description": "PWA mobile-first per operatori di recapito postale: importa libretti di gita in PDF, indicizza gli indirizzi in locale e identifica immediatamente zona e subzona tramite riconoscimento vocale continuo e sintesi vocale.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

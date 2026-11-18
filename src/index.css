@@ -1,0 +1,34 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --color-poste-blue: #003399;
+  --color-poste-blue-dark: #002677;
+  --color-poste-yellow: #FFD100;
+  --color-poste-yellow-hover: #EBC000;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    background-color: #F5F7FB;
+    color: #0A1628;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.pb-safe {
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+}
+
+.pt-safe {
+  padding-top: max(0.5rem, env(safe-area-inset-top));
+}
