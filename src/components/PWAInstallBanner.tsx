@@ -101,7 +101,7 @@ export function PWAInstallBanner({
           onClick={() => setShowIOSModal(false)}
         >
           <div
-            className="bg-white rounded-3xl w-full max-w-md p-6 shadow-2xl"
+            className="bg-white rounded-3xl w-full max-w-md p-6 pb-operative sm:pb-6 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">

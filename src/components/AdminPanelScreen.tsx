@@ -789,7 +789,7 @@ export function AdminPanelScreen({
         </div>
       </header>
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 pb-20 space-y-5">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 pt-6 pb-operative space-y-5">
         {busyMessage && (
           <div className="bg-blue-50 border border-blue-200 rounded-2xl px-4 py-3 flex items-center gap-3 text-sm font-bold text-[#003399]">
             <Loader2 className="w-4 h-4 animate-spin shrink-0" />
@@ -1636,7 +1636,7 @@ export function AdminPanelScreen({
           onClick={() => setShowCenterModal(false)}
         >
           <div
-            className="bg-white rounded-t-3xl sm:rounded-3xl w-full max-w-md p-6 shadow-2xl"
+            className="bg-white rounded-t-3xl sm:rounded-3xl w-full max-w-md p-6 pb-operative sm:pb-6 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
@@ -1740,7 +1740,7 @@ export function AdminPanelScreen({
       {/* Modal Controllo Duplicati PDF */}
       {duplicatePrompt && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-end sm:items-center justify-center sm:p-4">
-          <div className="bg-white rounded-t-3xl sm:rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+          <div className="bg-white rounded-t-3xl sm:rounded-3xl max-w-lg w-full p-6 pb-operative sm:pb-6 shadow-2xl space-y-4">
             <div className="flex items-start gap-3">
               <div className="w-11 h-11 rounded-2xl bg-amber-100 text-amber-800 flex items-center justify-center shrink-0">
                 <AlertTriangle className="w-6 h-6" />

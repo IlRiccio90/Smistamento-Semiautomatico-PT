@@ -127,7 +127,7 @@ export function HomeScreen({
         </div>
       </header>
 
-      <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-6 pb-16">
+      <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 pt-6 pb-operative">
         <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-6">
           <div>
             <h2 className="text-xl sm:text-2xl font-extrabold text-[#0A1628] tracking-tight">

@@ -131,7 +131,7 @@ export function OperationalModeScreen({
   const TierIcon = tierStyles?.icon ?? CheckCircle2;
 
   return (
-    <div className="min-h-screen bg-[#001D5C] text-white flex flex-col">
+    <div className="min-h-[100dvh] bg-[#001D5C] text-white flex flex-col">
       {/* Compact Sticky Top Bar */}
       <header className="sticky top-0 z-30 bg-[#002677]/95 backdrop-blur-md border-b border-white/10 pt-safe">
         <div className="max-w-5xl mx-auto px-3 sm:px-6 h-14 flex items-center justify-between gap-2">
@@ -180,7 +180,7 @@ export function OperationalModeScreen({
       </header>
 
       {/* Main High-Contrast Sorting Display */}
-      <main className="flex-1 max-w-5xl w-full mx-auto px-4 sm:px-6 py-4 flex flex-col justify-between gap-4 pb-safe">
+      <main className="flex-1 max-w-5xl w-full mx-auto px-4 sm:px-6 pt-4 pb-operative flex flex-col justify-between gap-4">
         {/* Stato Ascolto + Ultimo Indirizzo Riconosciuto */}
         <section className="rounded-2xl bg-white/8 border border-white/12 px-4 py-3">
           <div className="flex items-center justify-between gap-2 text-xs">
@@ -220,7 +220,7 @@ export function OperationalModeScreen({
         {/* HUGE RELIABILITY-COLORED FULL-DISPLAY RESULT CARD */}
         {bestMatch && tierStyles ? (
           <section
-            className={`flex-1 flex flex-col items-center justify-center rounded-3xl border-2 p-5 sm:p-8 shadow-2xl min-h-[270px] sm:min-h-[330px] text-center transition-colors ${tierStyles.card}`}
+            className={`flex-1 flex flex-col items-center justify-center rounded-3xl border-2 p-5 sm:p-8 shadow-2xl min-h-[220px] sm:min-h-[280px] text-center transition-colors ${tierStyles.card}`}
           >
             {/* Stato Affidabilità & Percentuale */}
             <div className="flex flex-wrap items-center justify-center gap-2.5 mb-2">
@@ -322,7 +322,7 @@ export function OperationalModeScreen({
               )}
           </section>
         ) : searchResult ? (
-          <section className="flex-1 flex flex-col items-center justify-center rounded-3xl bg-red-600 text-white border-2 border-red-400/50 p-6 sm:p-8 shadow-2xl min-h-[270px] sm:min-h-[330px] text-center">
+          <section className="flex-1 flex flex-col items-center justify-center rounded-3xl bg-red-600 text-white border-2 border-red-400/50 p-6 sm:p-8 shadow-2xl min-h-[220px] sm:min-h-[280px] text-center">
             <div className="max-w-md space-y-2">
               <p className="font-mono text-5xl sm:text-6xl font-black opacity-80">
                 —
@@ -336,7 +336,7 @@ export function OperationalModeScreen({
             </div>
           </section>
         ) : (
-          <section className="flex-1 flex flex-col items-center justify-center rounded-3xl bg-[#FFD100] text-[#002677] p-6 sm:p-8 shadow-2xl min-h-[270px] sm:min-h-[330px] text-center">
+          <section className="flex-1 flex flex-col items-center justify-center rounded-3xl bg-[#FFD100] text-[#002677] p-6 sm:p-8 shadow-2xl min-h-[220px] sm:min-h-[280px] text-center">
             <div className="max-w-md space-y-3">
               <div className="w-16 h-16 rounded-2xl bg-[#002677]/10 flex items-center justify-center mx-auto">
                 <Mic className="w-8 h-8 text-[#002677]" />

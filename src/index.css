@@ -29,6 +29,10 @@
   padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
 }
 
+.pb-operative {
+  padding-bottom: calc(100px + env(safe-area-inset-bottom, 0px));
+}
+
 .pt-safe {
   padding-top: max(0.5rem, env(safe-area-inset-top));
 }

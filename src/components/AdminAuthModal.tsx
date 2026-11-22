@@ -149,7 +149,7 @@ export function AdminAuthModal({ onClose, onAuthenticated }: AdminAuthModalProps
       onClick={onClose}
     >
       <div
-        className="bg-white rounded-t-3xl sm:rounded-3xl w-full max-w-md p-6 shadow-2xl pb-safe"
+        className="bg-white rounded-t-3xl sm:rounded-3xl w-full max-w-md p-6 pb-operative sm:pb-6 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="w-10 h-1.5 bg-slate-200 rounded-full mx-auto mb-4 sm:hidden" />

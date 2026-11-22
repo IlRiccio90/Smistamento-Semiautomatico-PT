@@ -127,7 +127,7 @@ export function CenterDetailScreen({
         </div>
       </header>
 
-      <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-5 pb-24">
+      <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 pt-5 pb-operative">
         {/* Hero Operational Launch Card */}
         <section className="bg-[#002677] text-white rounded-3xl p-5 sm:p-6 mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-md">
           <div>
