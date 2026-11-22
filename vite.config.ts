@@ -74,6 +74,19 @@ export default defineConfig(() => {
                 },
               },
             },
+            {
+              urlPattern: /\/api\/cloud\/centers\/[^/]+\/sync-ack$/i,
+              handler: 'NetworkOnly',
+              method: 'POST',
+              options: {
+                backgroundSync: {
+                  name: 'smistamento-sync-ack-queue',
+                  options: {
+                    maxRetentionTime: 24 * 60,
+                  },
+                },
+              },
+            },
           ],
         },
         devOptions: {

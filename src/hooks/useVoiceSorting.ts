@@ -79,8 +79,25 @@ export function formatSpokenZonePhrase(zona: string, subzona: string): string {
   return `Zona ${zWord} ${subClean}`.trim();
 }
 
+export function formatReliableZoneSpeech(
+  zona: string,
+  subzona: string,
+  confidence: number
+): string {
+  const zClean = zona.trim();
+  const zWord = ITALIAN_ZONE_NUMBERS[zClean] ?? zClean;
+  const subClean = subzona.trim().toUpperCase();
+  if (confidence >= 95) {
+    return `Zona ${zWord} ${subClean}`.trim();
+  }
+  if (confidence >= 80) {
+    return `Probabile zona ${zWord} ${subClean}`.trim();
+  }
+  return `Attenzione. Corrispondenza incerta. Probabile zona ${zWord} ${subClean}`.trim();
+}
+
 export interface UseVoiceSortingOptions {
-  onTranscriptQuery: (transcript: string, isFinal: boolean) => void;
+  onTranscriptQuery: (transcript: string, isFinal: boolean, speechConfidence?: number) => void;
 }
 
 export function useVoiceSorting({ onTranscriptQuery }: UseVoiceSortingOptions) {
@@ -136,7 +153,7 @@ export function useVoiceSorting({ onTranscriptQuery }: UseVoiceSortingOptions) {
         }
         utterance.onstart = () => {
           setIsSpeaking(true);
-          suppressUntilRef.current = Date.now() + 2600;
+          suppressUntilRef.current = Date.now() + 3400;
         };
         utterance.onend = () => {
           setIsSpeaking(false);
@@ -155,8 +172,8 @@ export function useVoiceSorting({ onTranscriptQuery }: UseVoiceSortingOptions) {
   );
 
   const speakZoneCode = useCallback(
-    (zona: string, subzona: string) => {
-      speakPhrase(formatSpokenZonePhrase(zona, subzona));
+    (zona: string, subzona: string, confidence = 100) => {
+      speakPhrase(formatReliableZoneSpeech(zona, subzona, confidence));
     },
     [speakPhrase]
   );
@@ -212,15 +229,23 @@ export function useVoiceSorting({ onTranscriptQuery }: UseVoiceSortingOptions) {
 
         let interimAccum = '';
         let finalAccum = '';
+        let confidenceSum = 0;
+        let confidenceCount = 0;
 
         for (let i = event.resultIndex; i < event.results.length; i++) {
           const res = event.results[i];
-          const text = res[0]?.transcript?.trim() ?? '';
+          const alt = res[0];
+          const text = alt?.transcript?.trim() ?? '';
           if (!text) continue;
 
-          // Filtra eventuale eco della sintesi vocale ("zona due b", "zona uno a")
-          if (/^zona\s+(?:uno|due|tre|quattro|cinque|sei|sette|otto|nove|dieci|\d+)\s+[a-z]$/i.test(text)) {
+          // Filtra eventuale eco della sintesi vocale
+          if (/^(?:attenzione\.\s+corrispondenza\s+incerta\.\s+)?(?:probabile\s+)?zona\s+(?:uno|due|tre|quattro|cinque|sei|sette|otto|nove|dieci|\d+)\s+[a-z]$/i.test(text)) {
             continue;
+          }
+
+          if (typeof alt?.confidence === 'number' && alt.confidence > 0) {
+            confidenceSum += alt.confidence;
+            confidenceCount++;
           }
 
           if (res.isFinal) {
@@ -230,18 +255,20 @@ export function useVoiceSorting({ onTranscriptQuery }: UseVoiceSortingOptions) {
           }
         }
 
+        const avgSpeechConf =
+          confidenceCount > 0 ? confidenceSum / confidenceCount : undefined;
+
         if (interimAccum) {
           setInterimText(interimAccum);
           if (interimFallbackTimerRef.current !== null) {
             window.clearTimeout(interimFallbackTimerRef.current);
           }
-          // Su alcuni dispositivi Android, il risultato finale tarda; dopo 950ms di pausa risolviamo l'interim
           const snapshot = interimAccum;
           interimFallbackTimerRef.current = window.setTimeout(() => {
             if (Date.now() >= suppressUntilRef.current && snapshot.length >= 4) {
               setLastFinalText(snapshot);
               setInterimText('');
-              onQueryRef.current(snapshot, true);
+              onQueryRef.current(snapshot, true, avgSpeechConf);
             }
           }, 950);
         }
@@ -253,7 +280,7 @@ export function useVoiceSorting({ onTranscriptQuery }: UseVoiceSortingOptions) {
           }
           setInterimText('');
           setLastFinalText(finalAccum);
-          onQueryRef.current(finalAccum, true);
+          onQueryRef.current(finalAccum, true, avgSpeechConf);
         }
       };
 

@@ -599,10 +599,23 @@ export async function extractPdfToCenterRecords(options: {
   else if (ocrPagesCount > 0 && nativePagesCount > 0) extractionMethod = 'hybrid';
   else if (ocrPagesCount > 0) extractionMethod = 'ocr';
 
+  let fileHash = '';
+  if (typeof crypto !== 'undefined' && crypto.subtle) {
+    try {
+      const digest = await crypto.subtle.digest('SHA-256', buffer.slice(0));
+      fileHash = Array.from(new Uint8Array(digest))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+    } catch {
+      fileHash = '';
+    }
+  }
+
   const pdfRecord: PdfDocumentRecord = {
     id: pdfId,
     centerId,
     fileName,
+    fileHash,
     zoneNumber: defaultZone,
     frazionario,
     fileSize: buffer.byteLength,

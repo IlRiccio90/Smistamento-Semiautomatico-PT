@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   ArrowLeft,
   CheckCircle2,
   CornerDownLeft,
@@ -6,15 +7,17 @@ import {
   Mic,
   MicOff,
   Search,
+  ShieldAlert,
   Volume2,
   VolumeX,
 } from 'lucide-react';
 import { useCallback, useMemo, useState, type FormEvent } from 'react';
 import { buildCenterIndex, searchAddressInIndex } from '../engine/searchEngine';
-import { formatSpokenZonePhrase, useVoiceSorting } from '../hooks/useVoiceSorting';
+import { formatReliableZoneSpeech, useVoiceSorting } from '../hooks/useVoiceSorting';
 import type {
   AddressRecord,
   DeliveryCenter,
+  ReliabilityTier,
   SearchOutput,
   SortingHistoryItem,
 } from '../types/sorting';
@@ -23,6 +26,37 @@ interface OperationalModeScreenProps {
   center: DeliveryCenter;
   addresses: AddressRecord[];
   onBack: () => void;
+}
+
+function getTierStyles(tier: ReliabilityTier) {
+  if (tier === 'high') {
+    return {
+      card: 'bg-emerald-600 text-white border-emerald-400/50',
+      subText: 'text-emerald-100',
+      badge: 'bg-emerald-900/35 text-white border border-white/25',
+      altBtn: 'bg-white/15 hover:bg-white/25 text-white border border-white/20',
+      divider: 'border-white/20',
+      icon: CheckCircle2,
+    };
+  }
+  if (tier === 'medium') {
+    return {
+      card: 'bg-[#FFD100] text-[#002677] border-[#EBC000]',
+      subText: 'text-[#002677]/80',
+      badge: 'bg-[#002677] text-[#FFD100] border border-[#002677]',
+      altBtn: 'bg-[#002677]/12 hover:bg-[#002677]/20 text-[#002677] border border-[#002677]/15',
+      divider: 'border-[#002677]/15',
+      icon: AlertTriangle,
+    };
+  }
+  return {
+    card: 'bg-red-600 text-white border-red-400/50',
+    subText: 'text-red-100',
+    badge: 'bg-red-950/45 text-white border border-white/30',
+    altBtn: 'bg-white/15 hover:bg-white/25 text-white border border-white/25',
+    divider: 'border-white/25',
+    icon: ShieldAlert,
+  };
 }
 
 export function OperationalModeScreen({
@@ -40,16 +74,16 @@ export function OperationalModeScreen({
     [center.id, addresses]
   );
 
-  // Ref-safe wrapper perché useVoiceSorting invoca onTranscriptQuery dentro i listener Web Speech
-  const speakRef = { current: (_z: string, _s: string) => {} };
+  const speakRef = { current: (_z: string, _s: string, _c: number) => {} };
 
   const executeLookup = useCallback(
-    (queryText: string, shouldSpeak: boolean) => {
+    (queryText: string, shouldSpeak: boolean, speechConfidence?: number) => {
       const cleaned = queryText.trim();
       if (!cleaned) return;
       setLastQuery(cleaned);
 
-      const output = searchAddressInIndex(searchIndex, cleaned);
+      // Ricerca eseguita esclusivamente sul database locale IndexedDB
+      const output = searchAddressInIndex(searchIndex, cleaned, { speechConfidence });
       setSearchResult(output);
 
       if (output.best) {
@@ -63,12 +97,13 @@ export function OperationalModeScreen({
             comune: best.record.comune,
             indirizzo: `${best.record.tipoStrada} ${best.record.nomeStrada}${best.record.civicoRaw ? ' ' + best.record.civicoRaw : ''}`,
             confidence: best.confidence,
+            reliabilityTier: best.reliabilityTier,
           };
           return [item, ...prev.slice(0, 5)];
         });
 
         if (shouldSpeak) {
-          speakRef.current(best.record.zona, best.record.subzona);
+          speakRef.current(best.record.zona, best.record.subzona, best.confidence);
         }
       }
     },
@@ -76,9 +111,9 @@ export function OperationalModeScreen({
   );
 
   const voice = useVoiceSorting({
-    onTranscriptQuery: (transcript, isFinal) => {
+    onTranscriptQuery: (transcript, isFinal, speechConfidence) => {
       if (isFinal) {
-        executeLookup(transcript, true);
+        executeLookup(transcript, true, speechConfidence);
       }
     },
   });
@@ -88,10 +123,12 @@ export function OperationalModeScreen({
   const handleManualSubmit = (e: FormEvent) => {
     e.preventDefault();
     if (!manualQuery.trim()) return;
-    executeLookup(manualQuery, true);
+    executeLookup(manualQuery, true, 1);
   };
 
   const bestMatch = searchResult?.best ?? null;
+  const tierStyles = bestMatch ? getTierStyles(bestMatch.reliabilityTier) : null;
+  const TierIcon = tierStyles?.icon ?? CheckCircle2;
 
   return (
     <div className="min-h-screen bg-[#001D5C] text-white flex flex-col">
@@ -112,10 +149,10 @@ export function OperationalModeScreen({
             </button>
             <div className="min-w-0">
               <p className="text-xs sm:text-sm font-extrabold truncate text-[#FFD100]">
-                {center.name}
+                {center.name} · v{center.localVersion ?? center.version}
               </p>
               <p className="text-[11px] text-blue-200 truncate tabular-nums">
-                {addresses.length.toLocaleString('it-IT')} indirizzi ·{' '}
+                {addresses.length.toLocaleString('it-IT')} indirizzi locali ·{' '}
                 {voice.isListening ? 'Microfono attivo' : 'In attesa'}
               </p>
             </div>
@@ -180,94 +217,139 @@ export function OperationalModeScreen({
           )}
         </section>
 
-        {/* HUGE FULL-DISPLAY RESULT CARD */}
-        <section className="flex-1 flex flex-col items-center justify-center rounded-3xl bg-[#FFD100] text-[#002677] p-6 sm:p-8 shadow-2xl min-h-[260px] sm:min-h-[320px] text-center">
-          {bestMatch ? (
-            <>
-              <p className="text-xs sm:text-sm font-extrabold uppercase tracking-[0.18em] text-[#002677]/75">
-                Zona di Recapito
-              </p>
-
-              <button
-                type="button"
-                onClick={() =>
-                  voice.speakZoneCode(bestMatch.record.zona, bestMatch.record.subzona)
-                }
-                title="Tocca per riascoltare"
-                className="my-2 font-mono font-black tracking-tight leading-none text-[6.5rem] sm:text-[9rem] md:text-[10.5rem] tabular-nums select-none active:scale-95 transition-transform"
+        {/* HUGE RELIABILITY-COLORED FULL-DISPLAY RESULT CARD */}
+        {bestMatch && tierStyles ? (
+          <section
+            className={`flex-1 flex flex-col items-center justify-center rounded-3xl border-2 p-5 sm:p-8 shadow-2xl min-h-[270px] sm:min-h-[330px] text-center transition-colors ${tierStyles.card}`}
+          >
+            {/* Stato Affidabilità & Percentuale */}
+            <div className="flex flex-wrap items-center justify-center gap-2.5 mb-2">
+              <span
+                className={`px-3 py-1 rounded-xl text-xs sm:text-sm font-extrabold uppercase tracking-wider inline-flex items-center gap-1.5 ${tierStyles.badge}`}
               >
-                {bestMatch.code}
-              </button>
+                <TierIcon className="w-4 h-4" />
+                <span>{bestMatch.reliabilityLabel}</span>
+              </span>
+              <span className="font-mono text-lg sm:text-xl font-black tabular-nums">
+                {bestMatch.confidence}%
+              </span>
+            </div>
 
-              <div className="space-y-1 max-w-xl">
-                <p className="text-base sm:text-xl font-extrabold text-[#001D5C]">
-                  {bestMatch.record.tipoStrada} {bestMatch.record.nomeStrada}
-                  {bestMatch.record.civicoRaw ? ` ${bestMatch.record.civicoRaw}` : ''}
-                </p>
-                <p className="text-xs sm:text-sm font-bold text-[#002677]/80">
-                  {bestMatch.record.comune}
-                  {bestMatch.record.frazione ? ` · ${bestMatch.record.frazione}` : ''}
-                  {bestMatch.record.note ? ` · ${bestMatch.record.note}` : ''}
-                </p>
-                <p className="pt-1 text-xs font-semibold text-[#002677]/70 inline-flex items-center gap-1.5 justify-center">
-                  <CheckCircle2 className="w-3.5 h-3.5" />
-                  <span>
-                    Pronunciato: “{formatSpokenZonePhrase(bestMatch.record.zona, bestMatch.record.subzona)}” · Affidabilità {bestMatch.confidence}%
-                  </span>
-                </p>
-              </div>
+            <button
+              type="button"
+              onClick={() =>
+                voice.speakZoneCode(
+                  bestMatch.record.zona,
+                  bestMatch.record.subzona,
+                  bestMatch.confidence
+                )
+              }
+              title="Tocca per riascoltare"
+              className="my-1 font-mono font-black tracking-tight leading-none text-[6rem] sm:text-[8.5rem] md:text-[10rem] tabular-nums select-none active:scale-95 transition-transform"
+            >
+              {bestMatch.code}
+            </button>
 
-              {searchResult && searchResult.alternatives.length > 0 && (
-                <div className="mt-5 pt-3 border-t border-[#002677]/15 w-full max-w-xl flex flex-wrap items-center justify-center gap-2">
-                  <span className="text-[11px] font-bold uppercase tracking-wider text-[#002677]/70">
-                    Alternative:
-                  </span>
-                  {searchResult.alternatives.slice(0, 3).map((alt) => (
-                    <button
-                      key={alt.record.id}
-                      type="button"
-                      onClick={() => {
-                        setSearchResult({
-                          ...searchResult,
-                          best: alt,
-                        });
-                        voice.speakZoneCode(alt.record.zona, alt.record.subzona);
-                      }}
-                      className="min-h-[36px] px-2.5 rounded-lg bg-[#002677]/10 hover:bg-[#002677]/20 text-xs font-bold text-[#002677] tabular-nums"
-                    >
-                      <span className="font-mono font-extrabold mr-1">{alt.code}</span>
-                      {alt.record.nomeStrada} ({alt.record.comune})
-                    </button>
-                  ))}
+            <div className="space-y-1 max-w-xl">
+              <p className="text-base sm:text-xl font-extrabold">
+                {bestMatch.record.tipoStrada} {bestMatch.record.nomeStrada}
+                {bestMatch.record.civicoRaw ? ` ${bestMatch.record.civicoRaw}` : ''}
+              </p>
+              <p className={`text-xs sm:text-sm font-bold ${tierStyles.subText}`}>
+                {bestMatch.record.comune}
+                {bestMatch.record.frazione ? ` · ${bestMatch.record.frazione}` : ''}
+                {bestMatch.record.note ? ` · ${bestMatch.record.note}` : ''}
+              </p>
+              <p className={`pt-1 text-xs font-semibold ${tierStyles.subText}`}>
+                Voce: “
+                {formatReliableZoneSpeech(
+                  bestMatch.record.zona,
+                  bestMatch.record.subzona,
+                  bestMatch.confidence
+                )}
+                ”
+              </p>
+            </div>
+
+            {/* Quando affidabilità < 80% mostra sempre le 3 migliori alternative */}
+            {searchResult &&
+              searchResult.alternatives.length > 0 &&
+              (bestMatch.confidence < 80 || bestMatch.reliabilityTier !== 'high') && (
+                <div
+                  className={`mt-5 pt-4 border-t ${tierStyles.divider} w-full max-w-xl`}
+                >
+                  <p className={`text-[11px] font-extrabold uppercase tracking-wider mb-2 ${tierStyles.subText}`}>
+                    {bestMatch.confidence < 80
+                      ? '3 migliori alternative trovate:'
+                      : 'Altre corrispondenze possibili:'}
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    {searchResult.alternatives.slice(0, 3).map((alt) => (
+                      <button
+                        key={alt.record.id}
+                        type="button"
+                        onClick={() => {
+                          setSearchResult({
+                            ...searchResult,
+                            best: alt,
+                          });
+                          voice.speakZoneCode(
+                            alt.record.zona,
+                            alt.record.subzona,
+                            alt.confidence
+                          );
+                        }}
+                        className={`min-h-[48px] px-3 py-2 rounded-xl text-left transition-colors ${tierStyles.altBtn}`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-mono font-black text-base tabular-nums">
+                            {alt.code}
+                          </span>
+                          <span className="font-mono text-xs font-extrabold tabular-nums">
+                            {alt.confidence}%
+                          </span>
+                        </div>
+                        <p className="text-[11px] font-bold truncate mt-0.5">
+                          {alt.record.nomeStrada}
+                        </p>
+                        <p className="text-[10px] opacity-80 truncate">
+                          {alt.record.comune}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
-            </>
-          ) : searchResult ? (
+          </section>
+        ) : searchResult ? (
+          <section className="flex-1 flex flex-col items-center justify-center rounded-3xl bg-red-600 text-white border-2 border-red-400/50 p-6 sm:p-8 shadow-2xl min-h-[270px] sm:min-h-[330px] text-center">
             <div className="max-w-md space-y-2">
-              <p className="font-mono text-5xl sm:text-6xl font-black text-[#002677]/40">
+              <p className="font-mono text-5xl sm:text-6xl font-black opacity-80">
                 —
               </p>
-              <p className="text-lg font-extrabold text-[#002677]">
-                Indirizzo non trovato nell’archivio
+              <p className="text-lg font-extrabold">
+                Indirizzo non trovato nell’archivio locale
               </p>
-              <p className="text-xs sm:text-sm font-medium text-[#002677]/80">
+              <p className="text-xs sm:text-sm font-medium text-red-100">
                 Prova a ripetere specificando prima il Comune e poi il nome della via (es. “Sant’Angelo Via De Gasperi”).
               </p>
             </div>
-          ) : (
+          </section>
+        ) : (
+          <section className="flex-1 flex flex-col items-center justify-center rounded-3xl bg-[#FFD100] text-[#002677] p-6 sm:p-8 shadow-2xl min-h-[270px] sm:min-h-[330px] text-center">
             <div className="max-w-md space-y-3">
               <div className="w-16 h-16 rounded-2xl bg-[#002677]/10 flex items-center justify-center mx-auto">
                 <Mic className="w-8 h-8 text-[#002677]" />
               </div>
               <p className="text-xl sm:text-2xl font-extrabold text-[#002677]">
-                Pronto per lo smistamento
+                Pronto per lo smistamento offline
               </p>
               <p className="text-xs sm:text-sm font-semibold text-[#002677]/80">
-                Attiva il microfono continuo qui sotto e leggi ad alta voce l’indirizzo dalla corrispondenza. Il risultato apparirà istantaneamente.
+                Attiva il microfono continuo qui sotto e leggi ad alta voce l’indirizzo dalla corrispondenza. Tutte le ricerche avvengono sul database locale.
               </p>
             </div>
-          )}
-        </section>
+          </section>
+        )}
 
         {/* Recent History Strip */}
         {history.length > 0 && (
@@ -277,13 +359,21 @@ export function OperationalModeScreen({
               <button
                 key={item.id}
                 type="button"
-                onClick={() => executeLookup(item.query, true)}
+                onClick={() => executeLookup(item.query, true, 1)}
                 className="min-h-[40px] px-3 rounded-xl bg-white/10 hover:bg-white/15 text-left shrink-0 flex items-center gap-2"
               >
-                <span className="font-mono font-extrabold text-sm text-[#FFD100] tabular-nums">
-                  {item.code}
+                <span
+                  className={`font-mono font-extrabold text-sm tabular-nums ${
+                    item.reliabilityTier === 'high'
+                      ? 'text-emerald-300'
+                      : item.reliabilityTier === 'medium'
+                        ? 'text-[#FFD100]'
+                        : 'text-red-300'
+                  }`}
+                >
+                  {item.code} ({item.confidence}%)
                 </span>
-                <span className="text-xs text-blue-100 truncate max-w-[160px]">
+                <span className="text-xs text-blue-100 truncate max-w-[150px]">
                   {item.indirizzo}
                 </span>
               </button>
@@ -291,7 +381,7 @@ export function OperationalModeScreen({
           </section>
         )}
 
-        {/* Ergonomic Bottom Thumb-Zone Controls: Manual Fallback + Continuous Mic */}
+        {/* Ergonomic Bottom Thumb-Zone Controls */}
         <section className="space-y-3">
           <form onSubmit={handleManualSubmit} className="flex items-center gap-2">
             <div className="relative flex-1">

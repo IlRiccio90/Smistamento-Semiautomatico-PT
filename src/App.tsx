@@ -1,56 +1,166 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { AdminAuthModal } from './components/AdminAuthModal';
+import { AdminPanelScreen } from './components/AdminPanelScreen';
 import { CenterDetailScreen } from './components/CenterDetailScreen';
-import { HomeScreen } from './components/HomeScreen';
+import { HomeScreen, type HomeCenterItem } from './components/HomeScreen';
 import { OperationalModeScreen } from './components/OperationalModeScreen';
 import { PWAInstallBanner } from './components/PWAInstallBanner';
 import {
-  createCenter,
-  deleteCenter,
-  deletePdfAndAddresses,
+  applyCenterSyncDelta,
+  drainSyncQueue,
+  enqueueSyncAck,
   listCenters,
   listPdfsByCenter,
   loadCenterAddresses,
-  savePdfAndAddresses,
+  removeCenterFromDevice,
+  requestPersistentStorage,
 } from './db/indexedDb';
-import { extractPdfToCenterRecords } from './engine/pdfExtractor';
 import { invalidateCenterIndex } from './engine/searchEngine';
 import { usePWAInstall } from './hooks/usePWAInstall';
+import {
+  fetchCenterSyncDelta,
+  fetchCloudCenters,
+  sendSyncAck,
+} from './services/cloudApi';
 import type {
   AddressRecord,
+  AdminSession,
+  CenterSyncStatus,
   DeliveryCenter,
-  ExtractionProgress,
   PdfDocumentRecord,
 } from './types/sorting';
 
-type ActiveView = 'home' | 'center' | 'operational';
-
-const BUNDLED_SAMPLE_PDFS = [
-  { url: '/assets/aistudio/Zona_1_4560a8da.pdf', fileName: 'Zona 1.pdf' },
-  { url: '/assets/aistudio/Zona_2_8ab9d1f2.pdf', fileName: 'Zona 2.pdf' },
-];
+type ActiveView = 'home' | 'archive' | 'operational' | 'admin';
 
 export default function App() {
   const pwa = usePWAInstall();
 
   const [view, setView] = useState<ActiveView>('home');
-  const [centers, setCenters] = useState<DeliveryCenter[]>([]);
-  const [loadingCenters, setLoadingCenters] = useState(true);
+  const [cloudCenters, setCloudCenters] = useState<DeliveryCenter[]>([]);
+  const [localCenters, setLocalCenters] = useState<DeliveryCenter[]>([]);
+  const [loadingCloud, setLoadingCloud] = useState(true);
+  const [syncErrorBanner, setSyncErrorBanner] = useState<string | null>(null);
+  const [syncingCenterIds, setSyncingCenterIds] = useState<Set<string>>(() => new Set());
+
   const [selectedCenterId, setSelectedCenterId] = useState<string | null>(null);
   const [centerPdfs, setCenterPdfs] = useState<PdfDocumentRecord[]>([]);
   const [centerAddresses, setCenterAddresses] = useState<AddressRecord[]>([]);
-  const [uploadProgress, setUploadProgress] = useState<ExtractionProgress | null>(null);
-  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  // Sessione Admin mantenuta SOLO in memoria (mai salvata su localStorage/sessionStorage)
+  const [adminSession, setAdminSession] = useState<AdminSession | null>(null);
+  const [showAdminAuthModal, setShowAdminAuthModal] = useState(false);
   const [aiOcrAvailable, setAiOcrAvailable] = useState(false);
 
-  const selectedCenter = centers.find((c) => c.id === selectedCenterId) ?? null;
-
-  const refreshCenters = useCallback(async () => {
+  const refreshLocalCenters = useCallback(async () => {
     const list = await listCenters();
-    setCenters(list);
+    setLocalCenters(list);
     return list;
   }, []);
 
-  const loadCenterData = useCallback(async (centerId: string) => {
+  const refreshCloudCenters = useCallback(async () => {
+    if (!navigator.onLine) {
+      setLoadingCloud(false);
+      return;
+    }
+    setLoadingCloud(true);
+    try {
+      const list = await fetchCloudCenters();
+      setCloudCenters(list);
+      setSyncErrorBanner(null);
+    } catch {
+      // In assenza di rete o backend temporaneamente non raggiungibile, usa comunque IndexedDB locale
+    } finally {
+      setLoadingCloud(false);
+    }
+  }, []);
+
+  const flushBackgroundSyncQueue = useCallback(async () => {
+    if (!navigator.onLine) return;
+    const queued = await drainSyncQueue();
+    for (const item of queued) {
+      try {
+        await sendSyncAck(item.centerId, item.action, item.version);
+      } catch {
+        // Riaccoda se l'invio fallisce nuovamente
+        await enqueueSyncAck({
+          centerId: item.centerId,
+          centerName: item.centerName,
+          action: item.action,
+          version: item.version,
+        });
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    void requestPersistentStorage();
+    void (async () => {
+      await Promise.all([refreshLocalCenters(), refreshCloudCenters()]);
+      await flushBackgroundSyncQueue();
+    })();
+
+    fetch('/api/health')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data?.aiOcrAvailable) setAiOcrAvailable(true);
+      })
+      .catch(() => {});
+  }, [flushBackgroundSyncQueue, refreshCloudCenters, refreshLocalCenters]);
+
+  useEffect(() => {
+    if (pwa.isOnline) {
+      void refreshCloudCenters();
+      void flushBackgroundSyncQueue();
+    }
+  }, [flushBackgroundSyncQueue, pwa.isOnline, refreshCloudCenters]);
+
+  const homeItems = useMemo<HomeCenterItem[]>(() => {
+    const localMap = new Map(localCenters.map((c) => [c.id, c]));
+    const cloudMap = new Map(cloudCenters.map((c) => [c.id, c]));
+    const seenIds = new Set<string>();
+    const items: HomeCenterItem[] = [];
+
+    for (const cloud of cloudCenters) {
+      seenIds.add(cloud.id);
+      const local = localMap.get(cloud.id);
+      const localVersion = local?.localVersion ?? null;
+      const hasLocalArchive = Boolean(local);
+      let syncStatus: CenterSyncStatus = 'not_synced';
+      if (hasLocalArchive) {
+        syncStatus =
+          localVersion !== null && localVersion < cloud.version
+            ? 'update_available'
+            : 'synced';
+      }
+      items.push({
+        center: cloud,
+        cloudVersion: cloud.version,
+        localVersion,
+        syncStatus,
+        hasLocalArchive,
+      });
+    }
+
+    // Eventuali centri sincronizzati in locale quando si è completamente offline (cloudCenters vuoto)
+    for (const local of localCenters) {
+      if (seenIds.has(local.id)) continue;
+      const cloud = cloudMap.get(local.id);
+      items.push({
+        center: local,
+        cloudVersion: cloud?.version ?? null,
+        localVersion: local.localVersion ?? local.version,
+        syncStatus: 'synced',
+        hasLocalArchive: true,
+      });
+    }
+
+    return items.sort((a, b) => b.center.updatedAt - a.center.updatedAt);
+  }, [cloudCenters, localCenters]);
+
+  const selectedLocalCenter =
+    localCenters.find((c) => c.id === selectedCenterId) ?? null;
+
+  const loadLocalCenterArchive = useCallback(async (centerId: string) => {
     const [pdfs, addresses] = await Promise.all([
       listPdfsByCenter(centerId),
       loadCenterAddresses(centerId),
@@ -59,182 +169,84 @@ export default function App() {
     setCenterAddresses(addresses);
   }, []);
 
-  useEffect(() => {
-    void (async () => {
-      try {
-        await refreshCenters();
-      } finally {
-        setLoadingCenters(false);
-      }
-    })();
-
-    fetch('/api/health')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (data?.aiOcrAvailable) setAiOcrAvailable(true);
-      })
-      .catch(() => {
-        // Modalità offline o assenza backend AI
-      });
-  }, [refreshCenters]);
-
-  const handleSelectCenter = useCallback(
-    async (centerId: string, targetView: ActiveView = 'center') => {
+  const handleOpenLocalView = useCallback(
+    async (centerId: string, targetView: 'archive' | 'operational') => {
       setSelectedCenterId(centerId);
-      setUploadError(null);
-      await loadCenterData(centerId);
+      await loadLocalCenterArchive(centerId);
       setView(targetView);
     },
-    [loadCenterData]
+    [loadLocalCenterArchive]
   );
 
-  const handleCreateCenter = useCallback(
-    async (name: string, notes: string) => {
-      const created = await createCenter(name, notes);
-      await refreshCenters();
-      await handleSelectCenter(created.id, 'center');
+  const runSelectiveSync = useCallback(
+    async (centerId: string, isIncrementalUpdate: boolean) => {
+      setSyncErrorBanner(null);
+      setSyncingCenterIds((prev) => new Set(prev).add(centerId));
+      try {
+        const local = localCenters.find((c) => c.id === centerId);
+        const sinceVersion = isIncrementalUpdate ? local?.localVersion ?? 0 : 0;
+        const delta = await fetchCenterSyncDelta(centerId, sinceVersion);
+        await applyCenterSyncDelta(delta);
+        invalidateCenterIndex(centerId);
+
+        const ackAction =
+          delta.mode === 'delta' ? 'aggiornamento_incrementale' : 'sincronizzazione';
+        try {
+          await sendSyncAck(centerId, ackAction, delta.toVersion);
+        } catch {
+          await enqueueSyncAck({
+            centerId,
+            centerName: delta.center.name,
+            action: ackAction,
+            version: delta.toVersion,
+          });
+        }
+
+        await refreshLocalCenters();
+        if (selectedCenterId === centerId) {
+          await loadLocalCenterArchive(centerId);
+        }
+      } catch (err) {
+        setSyncErrorBanner(
+          err instanceof Error
+            ? err.message
+            : 'Sincronizzazione non riuscita. Verifica la connessione.'
+        );
+      } finally {
+        setSyncingCenterIds((prev) => {
+          const next = new Set(prev);
+          next.delete(centerId);
+          return next;
+        });
+      }
     },
-    [handleSelectCenter, refreshCenters]
+    [loadLocalCenterArchive, localCenters, refreshLocalCenters, selectedCenterId]
   );
 
-  const handleDeleteCenter = useCallback(
+  const handleRemoveLocalCenter = useCallback(
     async (centerId: string) => {
       invalidateCenterIndex(centerId);
-      await deleteCenter(centerId);
+      await removeCenterFromDevice(centerId);
       if (selectedCenterId === centerId) {
         setSelectedCenterId(null);
         setCenterPdfs([]);
         setCenterAddresses([]);
-        setView('home');
-      }
-      await refreshCenters();
-    },
-    [refreshCenters, selectedCenterId]
-  );
-
-  const processBuffersIntoCenter = useCallback(
-    async (
-      centerId: string,
-      items: Array<{ fileName: string; buffer: ArrayBuffer }>,
-      preferAiOcr = false
-    ) => {
-      setUploadError(null);
-      try {
-        for (const item of items) {
-          const { pdfRecord, addresses } = await extractPdfToCenterRecords({
-            centerId,
-            fileName: item.fileName,
-            buffer: item.buffer,
-            preferAiOcr,
-            onProgress: (prog) => setUploadProgress(prog),
-          });
-
-          if (addresses.length === 0) {
-            throw new Error(
-              `Nessun indirizzo estratto da "${item.fileName}". Verifica che il PDF contenga l'itinerario di gita o un elenco indirizzi leggibile.`
-            );
-          }
-
-          setUploadProgress({
-            fileName: item.fileName,
-            stage: 'saving',
-            currentPage: pdfRecord.pageCount,
-            totalPages: pdfRecord.pageCount,
-            extractedSoFar: addresses.length,
-            message: `Salvataggio locale di ${addresses.length.toLocaleString('it-IT')} indirizzi...`,
-          });
-
-          await savePdfAndAddresses(pdfRecord, item.buffer, addresses);
-          invalidateCenterIndex(centerId);
+        if (view === 'archive' || view === 'operational') {
+          setView('home');
         }
-
-        await Promise.all([refreshCenters(), loadCenterData(centerId)]);
-      } catch (err) {
-        setUploadError(
-          err instanceof Error
-            ? err.message
-            : 'Errore imprevisto durante la lettura o indicizzazione del PDF.'
-        );
-      } finally {
-        setUploadProgress(null);
       }
+      await refreshLocalCenters();
     },
-    [loadCenterData, refreshCenters]
+    [refreshLocalCenters, selectedCenterId, view]
   );
 
-  const handleUploadPdfs = useCallback(
-    async (files: File[], preferAiOcr: boolean) => {
-      if (!selectedCenterId) return;
-      const items: Array<{ fileName: string; buffer: ArrayBuffer }> = [];
-      for (const file of files) {
-        items.push({
-          fileName: file.name,
-          buffer: await file.arrayBuffer(),
-        });
-      }
-      await processBuffersIntoCenter(selectedCenterId, items, preferAiOcr);
-    },
-    [processBuffersIntoCenter, selectedCenterId]
-  );
-
-  const handleDeletePdf = useCallback(
-    async (pdfId: string) => {
-      if (!selectedCenterId) return;
-      invalidateCenterIndex(selectedCenterId);
-      await deletePdfAndAddresses(selectedCenterId, pdfId);
-      await Promise.all([refreshCenters(), loadCenterData(selectedCenterId)]);
-    },
-    [loadCenterData, refreshCenters, selectedCenterId]
-  );
-
-  const importBundledSamples = useCallback(
-    async (targetCenterId?: string) => {
-      setUploadError(null);
-      let cid = targetCenterId;
-      if (!cid) {
-        const created = await createCenter(
-          'Sant’Angelo Lodigiano CD',
-          'Frazionario 38687 · Libretti Gita Zona 1 e Zona 2'
-        );
-        cid = created.id;
-        await refreshCenters();
-      }
-
-      setSelectedCenterId(cid);
-
-      const loadedBuffers: Array<{ fileName: string; buffer: ArrayBuffer }> = [];
-      try {
-        for (const sample of BUNDLED_SAMPLE_PDFS) {
-          setUploadProgress({
-            fileName: sample.fileName,
-            stage: 'reading',
-            currentPage: 0,
-            totalPages: 0,
-            extractedSoFar: 0,
-            message: `Caricamento ${sample.fileName}...`,
-          });
-          const resp = await fetch(sample.url);
-          if (!resp.ok) {
-            throw new Error(`Impossibile leggere ${sample.fileName}`);
-          }
-          loadedBuffers.push({
-            fileName: sample.fileName,
-            buffer: await resp.arrayBuffer(),
-          });
-        }
-        await processBuffersIntoCenter(cid, loadedBuffers, false);
-        setView('center');
-      } catch (err) {
-        setUploadProgress(null);
-        setUploadError(
-          err instanceof Error
-            ? err.message
-            : 'Impossibile importare i libretti reali.'
-        );
-      }
-    },
-    [processBuffersIntoCenter, refreshCenters]
-  );
+  const handleOpenAdmin = () => {
+    if (adminSession) {
+      setView('admin');
+    } else {
+      setShowAdminAuthModal(true);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[#F5F7FB] text-[#0A1628]">
@@ -250,43 +262,74 @@ export default function App() {
         />
       )}
 
+      {syncErrorBanner && view === 'home' && (
+        <div
+          role="alert"
+          className="bg-red-50 border-b border-red-200 px-4 py-2.5 text-xs sm:text-sm font-semibold text-red-700 text-center"
+        >
+          {syncErrorBanner}
+        </div>
+      )}
+
       {view === 'home' && (
         <HomeScreen
-          centers={centers}
-          loading={loadingCenters}
-          sampleProgress={uploadProgress}
-          onSelectCenter={(cid) => void handleSelectCenter(cid, 'center')}
-          onStartVoiceCenter={(cid) => void handleSelectCenter(cid, 'operational')}
-          onCreateCenter={handleCreateCenter}
-          onDeleteCenter={handleDeleteCenter}
-          onImportSampleCenter={() => importBundledSamples()}
+          items={homeItems}
+          loading={loadingCloud}
+          isOnline={pwa.isOnline}
+          adminSession={adminSession}
+          syncingCenterIds={syncingCenterIds}
+          onOpenAdmin={handleOpenAdmin}
+          onRefreshCloud={refreshCloudCenters}
+          onSyncCenter={(cid) => runSelectiveSync(cid, false)}
+          onUpdateCenter={(cid) => runSelectiveSync(cid, true)}
+          onRemoveLocalCenter={handleRemoveLocalCenter}
+          onStartVoiceCenter={(cid) => void handleOpenLocalView(cid, 'operational')}
+          onInspectLocalArchive={(cid) => void handleOpenLocalView(cid, 'archive')}
         />
       )}
 
-      {view === 'center' && selectedCenter && (
+      {view === 'archive' && selectedLocalCenter && (
         <CenterDetailScreen
-          center={selectedCenter}
+          center={selectedLocalCenter}
           pdfs={centerPdfs}
           addresses={centerAddresses}
-          uploadProgress={uploadProgress}
-          uploadError={uploadError}
-          aiOcrAvailable={aiOcrAvailable}
-          onBack={() => {
-            setUploadError(null);
-            setView('home');
-          }}
+          onBack={() => setView('home')}
           onStartOperational={() => setView('operational')}
-          onUploadPdfs={handleUploadPdfs}
-          onDeletePdf={handleDeletePdf}
-          onImportBundledSamplesIntoCenter={() => importBundledSamples(selectedCenter.id)}
         />
       )}
 
-      {view === 'operational' && selectedCenter && (
+      {view === 'operational' && selectedLocalCenter && (
         <OperationalModeScreen
-          center={selectedCenter}
+          center={selectedLocalCenter}
           addresses={centerAddresses}
-          onBack={() => setView('center')}
+          onBack={() => setView('home')}
+        />
+      )}
+
+      {view === 'admin' && adminSession && (
+        <AdminPanelScreen
+          session={adminSession}
+          cloudCenters={cloudCenters}
+          localCenters={localCenters}
+          isOnline={pwa.isOnline}
+          aiOcrAvailable={aiOcrAvailable}
+          onBackHome={() => setView('home')}
+          onLoggedOut={() => {
+            setAdminSession(null);
+            setView('home');
+          }}
+          onCentersChanged={refreshCloudCenters}
+        />
+      )}
+
+      {showAdminAuthModal && (
+        <AdminAuthModal
+          onClose={() => setShowAdminAuthModal(false)}
+          onAuthenticated={(session) => {
+            setAdminSession(session);
+            setShowAdminAuthModal(false);
+            setView('admin');
+          }}
         />
       )}
     </div>

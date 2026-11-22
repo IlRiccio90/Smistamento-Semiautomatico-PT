@@ -1,5 +1,19 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
-import type { AddressRecord, DeliveryCenter, PdfDocumentRecord } from '../types/sorting';
+import type {
+  AddressRecord,
+  CloudSyncDeltaResponse,
+  DeliveryCenter,
+  PdfDocumentRecord,
+} from '../types/sorting';
+
+export interface SyncQueueItem {
+  id: string;
+  centerId: string;
+  centerName: string;
+  action: 'sincronizzazione' | 'aggiornamento_incrementale';
+  version: number;
+  createdAt: number;
+}
 
 interface SmistamentoDBSchema extends DBSchema {
   centers: {
@@ -30,10 +44,21 @@ interface SmistamentoDBSchema extends DBSchema {
       'by-center-comune': [string, string];
     };
   };
+  syncMeta: {
+    key: string;
+    value: {
+      key: string;
+      value: string | number;
+    };
+  };
+  syncQueue: {
+    key: string;
+    value: SyncQueueItem;
+  };
 }
 
 const DB_NAME = 'smistamento-pt-db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise: Promise<IDBPDatabase<SmistamentoDBSchema>> | null = null;
 
@@ -59,10 +84,27 @@ function getDb(): Promise<IDBPDatabase<SmistamentoDBSchema>> {
           addrStore.createIndex('by-pdf', 'pdfId');
           addrStore.createIndex('by-center-comune', ['centerId', 'comuneNorm']);
         }
+        if (!db.objectStoreNames.contains('syncMeta')) {
+          db.createObjectStore('syncMeta', { keyPath: 'key' });
+        }
+        if (!db.objectStoreNames.contains('syncQueue')) {
+          db.createObjectStore('syncQueue', { keyPath: 'id' });
+        }
       },
     });
   }
   return dbPromise;
+}
+
+export async function requestPersistentStorage(): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && navigator.storage?.persist) {
+    try {
+      return await navigator.storage.persist();
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 export async function listCenters(): Promise<DeliveryCenter[]> {
@@ -85,6 +127,9 @@ export async function createCenter(name: string, notes: string): Promise<Deliver
     notes: notes.trim(),
     createdAt: now,
     updatedAt: now,
+    version: 1,
+    localVersion: 1,
+    syncedAt: now,
     pdfCount: 0,
     addressCount: 0,
     zones: [],
@@ -92,22 +137,6 @@ export async function createCenter(name: string, notes: string): Promise<Deliver
   };
   await db.put('centers', center);
   return center;
-}
-
-export async function updateCenterMetadata(
-  centerId: string,
-  updates: Partial<Pick<DeliveryCenter, 'name' | 'notes'>>
-): Promise<DeliveryCenter | null> {
-  const db = await getDb();
-  const existing = await db.get('centers', centerId);
-  if (!existing) return null;
-  const updated: DeliveryCenter = {
-    ...existing,
-    ...updates,
-    updatedAt: Date.now(),
-  };
-  await db.put('centers', updated);
-  return updated;
 }
 
 export async function recomputeCenterStats(centerId: string): Promise<DeliveryCenter | null> {
@@ -142,7 +171,11 @@ export async function recomputeCenterStats(centerId: string): Promise<DeliveryCe
   return updated;
 }
 
-export async function deleteCenter(centerId: string): Promise<void> {
+/**
+ * Rimuove solo dal dispositivo locale (IndexedDB) un Centro sincronizzato.
+ * Non modifica mai il database centrale cloud.
+ */
+export async function removeCenterFromDevice(centerId: string): Promise<void> {
   const db = await getDb();
   const pdfs = await db.getAllFromIndex('pdfs', 'by-center', centerId);
   const addrKeys = await db.getAllKeysFromIndex('addresses', 'by-center', centerId);
@@ -160,11 +193,15 @@ export async function deleteCenter(centerId: string): Promise<void> {
   await tx.done;
 }
 
+export const deleteCenter = removeCenterFromDevice;
+
 export async function listPdfsByCenter(centerId: string): Promise<PdfDocumentRecord[]> {
   const db = await getDb();
   const list = await db.getAllFromIndex('pdfs', 'by-center', centerId);
-  return list.sort((a, b) =>
-    a.zoneNumber.localeCompare(b.zoneNumber, 'it', { numeric: true }) || b.importedAt - a.importedAt
+  return list.sort(
+    (a, b) =>
+      a.zoneNumber.localeCompare(b.zoneNumber, 'it', { numeric: true }) ||
+      b.importedAt - a.importedAt
   );
 }
 
@@ -181,7 +218,6 @@ export async function savePdfAndAddresses(
 ): Promise<DeliveryCenter | null> {
   const db = await getDb();
 
-  // Save PDF metadata + blob first
   {
     const tx = db.transaction(['pdfs', 'pdfBlobs'], 'readwrite');
     await tx.objectStore('pdfs').put(pdfRecord);
@@ -193,7 +229,6 @@ export async function savePdfAndAddresses(
     await tx.done;
   }
 
-  // Batch save addresses in chunks of 1000 inside transactions for maximum speed on mobile
   const CHUNK_SIZE = 1000;
   for (let i = 0; i < addresses.length; i += CHUNK_SIZE) {
     const chunk = addresses.slice(i, i + CHUNK_SIZE);
@@ -208,7 +243,10 @@ export async function savePdfAndAddresses(
   return recomputeCenterStats(pdfRecord.centerId);
 }
 
-export async function deletePdfAndAddresses(centerId: string, pdfId: string): Promise<DeliveryCenter | null> {
+export async function deletePdfAndAddresses(
+  centerId: string,
+  pdfId: string
+): Promise<DeliveryCenter | null> {
   const db = await getDb();
   const addrKeys = await db.getAllKeysFromIndex('addresses', 'by-pdf', pdfId);
   const tx = db.transaction(['pdfs', 'pdfBlobs', 'addresses'], 'readwrite');
@@ -226,4 +264,118 @@ export async function deletePdfAndAddresses(centerId: string, pdfId: string): Pr
 export async function loadCenterAddresses(centerId: string): Promise<AddressRecord[]> {
   const db = await getDb();
   return db.getAllFromIndex('addresses', 'by-center', centerId);
+}
+
+/**
+ * Applica in locale (IndexedDB) la sincronizzazione completa o solo le differenze incrementali
+ * scaricate dal cloud per uno specifico Centro di Recapito.
+ */
+export async function applyCenterSyncDelta(
+  delta: CloudSyncDeltaResponse
+): Promise<DeliveryCenter> {
+  const db = await getDb();
+  const centerId = delta.center.id;
+  const now = Date.now();
+
+  if (delta.mode === 'full') {
+    const oldPdfs = await db.getAllKeysFromIndex('pdfs', 'by-center', centerId);
+    const oldAddrs = await db.getAllKeysFromIndex('addresses', 'by-center', centerId);
+    const tx = db.transaction(['pdfs', 'addresses'], 'readwrite');
+    for (const k of oldPdfs) tx.objectStore('pdfs').delete(k);
+    for (const k of oldAddrs) tx.objectStore('addresses').delete(k);
+    await tx.done;
+  } else {
+    // Applica eliminazioni incrementali
+    if (delta.deletedPdfIds.length > 0 || delta.deletedAddressIds.length > 0) {
+      const tx = db.transaction(['pdfs', 'addresses'], 'readwrite');
+      const pdfStore = tx.objectStore('pdfs');
+      for (const pdfId of delta.deletedPdfIds) {
+        pdfStore.delete(pdfId);
+      }
+      const addrStore = tx.objectStore('addresses');
+      for (const addrId of delta.deletedAddressIds) {
+        addrStore.delete(addrId);
+      }
+      await tx.done;
+    }
+  }
+
+  // Upsert PDF metadata (senza scaricare i PDF binari sui dispositivi operatori!)
+  if (delta.upsertedPdfs.length > 0) {
+    const tx = db.transaction('pdfs', 'readwrite');
+    const store = tx.objectStore('pdfs');
+    for (const p of delta.upsertedPdfs) {
+      store.put(p);
+    }
+    await tx.done;
+  }
+
+  // Upsert indirizzi in batch
+  const CHUNK_SIZE = 1000;
+  for (let i = 0; i < delta.upsertedAddresses.length; i += CHUNK_SIZE) {
+    const chunk = delta.upsertedAddresses.slice(i, i + CHUNK_SIZE);
+    const tx = db.transaction('addresses', 'readwrite');
+    const store = tx.objectStore('addresses');
+    for (const addr of chunk) {
+      store.put(addr);
+    }
+    await tx.done;
+  }
+
+  const localCenter: DeliveryCenter = {
+    ...delta.center,
+    localVersion: delta.toVersion,
+    syncedAt: now,
+  };
+
+  {
+    const tx = db.transaction(['centers', 'syncMeta'], 'readwrite');
+    await tx.objectStore('centers').put(localCenter);
+    await tx.objectStore('syncMeta').put({ key: 'lastGlobalSyncAt', value: now });
+    await tx.done;
+  }
+
+  return localCenter;
+}
+
+export async function getLastGlobalSyncAt(): Promise<number | null> {
+  const db = await getDb();
+  const row = await db.get('syncMeta', 'lastGlobalSyncAt');
+  return typeof row?.value === 'number' ? row.value : null;
+}
+
+export async function getLocalStatsSummary(): Promise<{
+  centersCount: number;
+  pdfsCount: number;
+  addressesCount: number;
+  lastGlobalSyncAt: number | null;
+}> {
+  const db = await getDb();
+  const [centersCount, pdfsCount, addressesCount, lastGlobalSyncAt] = await Promise.all([
+    db.count('centers'),
+    db.count('pdfs'),
+    db.count('addresses'),
+    getLastGlobalSyncAt(),
+  ]);
+  return { centersCount, pdfsCount, addressesCount, lastGlobalSyncAt };
+}
+
+export async function enqueueSyncAck(item: Omit<SyncQueueItem, 'id' | 'createdAt'>): Promise<void> {
+  const db = await getDb();
+  await db.put('syncQueue', {
+    ...item,
+    id: crypto.randomUUID(),
+    createdAt: Date.now(),
+  });
+}
+
+export async function drainSyncQueue(): Promise<SyncQueueItem[]> {
+  const db = await getDb();
+  const items = await db.getAll('syncQueue');
+  if (items.length > 0) {
+    const tx = db.transaction('syncQueue', 'readwrite');
+    await tx.objectStore('syncQueue').clear();
+    await tx.done;
+  }
+  return items;
 }
