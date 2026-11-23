@@ -18,7 +18,7 @@ function requireSupabase(): SupabaseClient {
   const sb = getSupabaseClient();
   if (!sb) {
     throw new Error(
-      'Supabase non configurato. Inserisci Project URL e Publishable Key nella schermata di configurazione amministratore.'
+      'Servizio cloud non disponibile su questa build. Contatta il supporto tecnico per verificare la distribuzione dell’app.'
     );
   }
   return sb;

@@ -17,10 +17,7 @@ import {
 } from './db/indexedDb';
 import { invalidateCenterIndex } from './engine/searchEngine';
 import { usePWAInstall } from './hooks/usePWAInstall';
-import {
-  getSupabaseClient,
-  loadPersistentSupabaseConfig,
-} from './lib/supabaseClient';
+import { getSupabaseClient } from './lib/supabaseClient';
 import {
   fetchCenterSyncDelta,
   fetchCloudCenters,
@@ -54,10 +51,7 @@ export default function App() {
 
   const [adminSession, setAdminSession] = useState<AdminSession | null>(null);
   const [showAdminAuthModal, setShowAdminAuthModal] = useState(false);
-  const [authModalMode, setAuthModalMode] = useState<
-    'auto' | 'supabase_setup' | 'force_change_password'
-  >('auto');
-  const [supabaseRevision, setSupabaseRevision] = useState(0);
+  const [authModalMode, setAuthModalMode] = useState<'auto' | 'force_change_password'>('auto');
   const [aiOcrAvailable, setAiOcrAvailable] = useState(false);
 
   const refreshLocalCenters = useCallback(async () => {
@@ -77,7 +71,7 @@ export default function App() {
       setCloudCenters(list);
       setSyncErrorBanner(null);
     } catch {
-      // In assenza di rete o backend non ancora configurato, usa comunque IndexedDB locale
+      // In assenza di rete, usa comunque IndexedDB locale
     } finally {
       setLoadingCloud(false);
     }
@@ -100,13 +94,10 @@ export default function App() {
     }
   }, []);
 
-  // Avvio: carica configurazione Supabase persistente (env/localStorage/IndexedDB), ripristina sessione e sincronizza
+  // Avvio automatico: connessione immediata a Supabase centralizzato, ripristino sessione e sync Centri
   useEffect(() => {
     void requestPersistentStorage();
     void (async () => {
-      await loadPersistentSupabaseConfig();
-      setSupabaseRevision((r) => r + 1);
-
       const restored = await restoreAdminSessionApi().catch(() => null);
       if (restored) {
         setAdminSession(restored);
@@ -179,7 +170,7 @@ export default function App() {
     return () => {
       subscription.unsubscribe();
     };
-  }, [supabaseRevision]);
+  }, []);
 
   useEffect(() => {
     if (pwa.isOnline) {
@@ -394,16 +385,6 @@ export default function App() {
             setView('home');
           }}
           onCentersChanged={refreshCloudCenters}
-          onOpenSupabaseSetup={() => {
-            setAuthModalMode('supabase_setup');
-            setShowAdminAuthModal(true);
-          }}
-          onSupabaseDisconnected={() => {
-            setAdminSession(null);
-            setCloudCenters([]);
-            setView('home');
-            setSupabaseRevision((r) => r + 1);
-          }}
         />
       )}
 
@@ -414,10 +395,6 @@ export default function App() {
           onClose={() => {
             setShowAdminAuthModal(false);
             setAuthModalMode('auto');
-          }}
-          onSupabaseConfigured={async () => {
-            setSupabaseRevision((r) => r + 1);
-            await refreshCloudCenters();
           }}
           onAuthenticated={(session) => {
             setAdminSession(session);

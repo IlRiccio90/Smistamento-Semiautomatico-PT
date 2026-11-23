@@ -1,10 +1,6 @@
 import {
-  Check,
   CheckCircle2,
-  Copy,
-  Database,
   KeyRound,
-  Link2,
   Loader2,
   Lock,
   LogOut,
@@ -14,13 +10,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import {
-  getSupabaseConfig,
-  isSupabaseConfigured,
-  saveSupabaseConfig,
-  SUPABASE_BOOTSTRAP_SQL,
-  testSupabaseConnection,
-} from '../lib/supabaseClient';
+import { isSupabaseConfigured } from '../lib/supabaseClient';
 import {
   changeAdminPasswordApi,
   checkAdminEmail,
@@ -34,17 +24,14 @@ import {
 import type { AdminAuthDiagnostics, AdminSession } from '../types/sorting';
 
 interface AdminAuthModalProps {
-  initialMode?: 'auto' | 'supabase_setup' | 'force_change_password';
+  initialMode?: 'auto' | 'force_change_password';
   activeSessionForPasswordChange?: AdminSession | null;
   onClose: () => void;
-  onSupabaseConfigured?: () => Promise<void> | void;
   onAuthenticated: (session: AdminSession) => void;
 }
 
 type AuthStep =
   | 'checking'
-  | 'supabase_setup'
-  | 'supabase_schema_sql'
   | 'email_password'
   | 'setup_first_password'
   | 'auth_diagnostics'
@@ -57,25 +44,14 @@ export function AdminAuthModal({
   initialMode = 'auto',
   activeSessionForPasswordChange = null,
   onClose,
-  onSupabaseConfigured,
   onAuthenticated,
 }: AdminAuthModalProps) {
-  const existingCfg = getSupabaseConfig();
-
   const [step, setStep] = useState<AuthStep>(() => {
-    if (initialMode === 'supabase_setup' || !isSupabaseConfigured()) {
-      return 'supabase_setup';
-    }
     if (initialMode === 'force_change_password') {
       return 'force_change_password';
     }
-    return 'checking';
+    return isSupabaseConfigured() ? 'checking' : 'email_password';
   });
-
-  // Supabase guided config state
-  const [sbUrl, setSbUrl] = useState(existingCfg?.url || '');
-  const [sbKey, setSbKey] = useState(existingCfg?.anonKey || '');
-  const [copiedSql, setCopiedSql] = useState(false);
 
   // Auth state
   const [email, setEmail] = useState(
@@ -94,7 +70,11 @@ export function AdminAuthModal({
   const autoRedirectTimerRef = useRef<number | null>(null);
 
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(() =>
+    isSupabaseConfigured()
+      ? null
+      : 'Servizio cloud temporaneamente non disponibile. Verifica la connessione o contatta l’amministratore di sistema.'
+  );
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
 
   const clearAutoRedirect = () => {
@@ -151,17 +131,8 @@ export function AdminAuthModal({
         setStep('email_password');
       }
     } catch (err) {
-      const friendly = toFriendlyError(err);
-      if (
-        friendly.message.includes('non è ancora inizializzato') ||
-        friendly.message.includes('SQL')
-      ) {
-        setStep('supabase_schema_sql');
-        setError(friendly.message);
-      } else {
-        setStep('email_password');
-        setError(friendly.message);
-      }
+      setStep('email_password');
+      setError(toFriendlyError(err, 'Impossibile verificare lo stato del servizio cloud.').message);
     }
   };
 
@@ -170,76 +141,6 @@ export function AdminAuthModal({
       void detectFirstAdminState();
     }
   }, []);
-
-  // ---- STEP: GUIDED SUPABASE CONFIGURATION ----
-  const handleSaveAndTestSupabase = async (e: FormEvent) => {
-    e.preventDefault();
-    setError(null);
-    setInfoMessage(null);
-    setLoading(true);
-    try {
-      const check = await testSupabaseConnection(sbUrl, sbKey);
-      if (!check.ok) {
-        setError(check.message);
-        return;
-      }
-
-      await saveSupabaseConfig(sbUrl, sbKey);
-      if (onSupabaseConfigured) {
-        await onSupabaseConfigured();
-      }
-
-      if (!check.schemaReady) {
-        setInfoMessage(check.message);
-        setStep('supabase_schema_sql');
-        return;
-      }
-
-      await detectFirstAdminState();
-    } catch (err) {
-      setError(toFriendlyError(err, 'Impossibile salvare la configurazione Supabase.').message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleVerifySchemaReady = async () => {
-    setError(null);
-    setInfoMessage(null);
-    setLoading(true);
-    try {
-      const cfg = getSupabaseConfig();
-      const targetUrl = sbUrl.trim() || cfg?.url || '';
-      const targetKey = sbKey.trim() || cfg?.anonKey || '';
-      const check = await testSupabaseConnection(targetUrl, targetKey);
-      if (!check.ok || !check.schemaReady) {
-        setError(
-          check.ok
-            ? 'Le tabelle SQL non risultano ancora presenti. Esegui lo script nel SQL Editor di Supabase e riprova.'
-            : check.message
-        );
-        return;
-      }
-      if (onSupabaseConfigured) {
-        await onSupabaseConfigured();
-      }
-      await detectFirstAdminState();
-    } catch (err) {
-      setError(toFriendlyError(err, 'Verifica database non riuscita.').message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleCopySql = async () => {
-    try {
-      await navigator.clipboard.writeText(SUPABASE_BOOTSTRAP_SQL);
-      setCopiedSql(true);
-      setTimeout(() => setCopiedSql(false), 3000);
-    } catch {
-      setError('Copia automatica non consentita dal browser: seleziona e copia il testo SQL.');
-    }
-  };
 
   // ---- STEP: LOGIN AMMINISTRATORE ----
   const handleCheckAndLogin = async (e: FormEvent) => {
@@ -264,7 +165,7 @@ export function AdminAuthModal({
     }
   };
 
-  // ---- STEP: CREA PASSWORD (SOLO SE UTENTE NON ESISTE O SENZA CREDENZIALI) ----
+  // ---- STEP: CREA PASSWORD (SOLO QUANDO UTENTE NON ESISTE O NON HA CREDENZIALI) ----
   const handleSetupFirstPassword = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -385,24 +286,20 @@ export function AdminAuthModal({
   };
 
   const titleText =
-    step === 'supabase_setup' || step === 'supabase_schema_sql'
-      ? 'Configurazione Supabase'
-      : step === 'setup_first_password'
-        ? 'Crea Password'
-        : step === 'auth_diagnostics'
-          ? 'Diagnostica Accesso Admin'
-          : step === 'force_change_password'
-            ? 'Imposta Nuova Password'
-            : step === 'forgot_password'
-              ? 'Recupero Password'
-              : 'Accesso Amministratore';
+    step === 'setup_first_password'
+      ? 'Crea Password'
+      : step === 'auth_diagnostics'
+        ? 'Diagnostica Accesso Admin'
+        : step === 'force_change_password'
+          ? 'Imposta Nuova Password'
+          : step === 'forgot_password'
+            ? 'Recupero Password'
+            : 'Accesso Amministratore';
 
   const subtitleText =
-    step === 'supabase_setup' || step === 'supabase_schema_sql'
-      ? 'Configurazione riservata agli amministratori'
-      : step === 'auth_diagnostics'
-        ? 'Verifica stato Auth, sessione e profilo'
-        : 'Registrazione pubblica disabilitata';
+    step === 'auth_diagnostics'
+      ? 'Verifica stato Auth, sessione e profilo'
+      : 'Registrazione pubblica disabilitata';
 
   const diagnosticRows = diagnostics
     ? [
@@ -429,11 +326,7 @@ export function AdminAuthModal({
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2.5">
             <div className="w-10 h-10 rounded-xl bg-[#003399] text-[#FFD100] flex items-center justify-center shrink-0">
-              {step === 'supabase_setup' || step === 'supabase_schema_sql' ? (
-                <Database className="w-5 h-5" />
-              ) : (
-                <ShieldCheck className="w-5 h-5" />
-              )}
+              <ShieldCheck className="w-5 h-5" />
             </div>
             <div>
               <h2 className="text-lg font-extrabold text-[#003399]">{titleText}</h2>
@@ -474,142 +367,12 @@ export function AdminAuthModal({
           <div className="py-8 flex flex-col items-center justify-center gap-3 text-center">
             <Loader2 className="w-7 h-7 animate-spin text-[#003399]" />
             <p className="text-xs font-bold text-slate-600">
-              Verifica sessione Supabase e profilo amministratore...
+              Verifica sessione e profilo amministratore...
             </p>
           </div>
         )}
 
-        {/* 1. GUIDED SUPABASE CONFIGURATION */}
-        {step === 'supabase_setup' && (
-          <form onSubmit={handleSaveAndTestSupabase} className="space-y-4">
-            <p className="text-xs text-slate-600 leading-relaxed">
-              Supabase non è ancora configurato su questo dispositivo. Inserisci le credenziali pubbliche del tuo progetto (in <strong>Project Settings → API</strong>).
-            </p>
-
-            <div>
-              <label
-                htmlFor="sb-project-url"
-                className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1.5"
-              >
-                Supabase Project URL
-              </label>
-              <div className="relative">
-                <Link2 className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                <input
-                  id="sb-project-url"
-                  type="url"
-                  required
-                  autoFocus
-                  value={sbUrl}
-                  onChange={(e) => setSbUrl(e.target.value)}
-                  placeholder="https://tuoprogetto.supabase.co"
-                  className="w-full min-h-[48px] pl-10 pr-3.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:border-[#003399]"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label
-                htmlFor="sb-anon-key"
-                className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1.5"
-              >
-                Supabase Publishable Key (Anon Key)
-              </label>
-              <div className="relative">
-                <KeyRound className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                <input
-                  id="sb-anon-key"
-                  type="text"
-                  required
-                  value={sbKey}
-                  onChange={(e) => setSbKey(e.target.value)}
-                  placeholder="sb_publishable_... oppure eyJhbGci..."
-                  className="w-full min-h-[48px] pl-10 pr-3.5 rounded-xl border border-slate-300 font-mono text-xs focus:outline-none focus:border-[#003399]"
-                />
-              </div>
-            </div>
-
-            <div className="flex flex-col gap-2.5 pt-1">
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full min-h-[48px] rounded-xl bg-[#003399] hover:bg-[#002677] text-white font-bold text-sm disabled:opacity-50"
-              >
-                {loading ? 'Verifica e salvataggio...' : 'Salva e Collega Supabase'}
-              </button>
-              <button
-                type="button"
-                onClick={onClose}
-                className="w-full min-h-[48px] rounded-xl border border-slate-300 text-slate-700 font-bold text-sm hover:bg-slate-50"
-              >
-                Annulla
-              </button>
-            </div>
-          </form>
-        )}
-
-        {/* 2. SQL SCHEMA SETUP HELPER */}
-        {step === 'supabase_schema_sql' && (
-          <div className="space-y-4">
-            <p className="text-xs text-slate-700 leading-relaxed">
-              Apri il <strong>SQL Editor</strong> della tua dashboard Supabase, incolla questo script ed eseguilo una sola volta. Verranno creati database, policy RLS, storage PDF e il profilo admin per <strong>{DEFAULT_ADMIN_EMAIL}</strong>.
-            </p>
-
-            <div className="relative">
-              <pre className="max-h-40 overflow-y-auto rounded-xl bg-slate-900 text-slate-100 p-3 text-[10px] font-mono leading-relaxed">
-                {SUPABASE_BOOTSTRAP_SQL}
-              </pre>
-              <button
-                type="button"
-                onClick={() => void handleCopySql()}
-                className="mt-2 w-full min-h-[44px] rounded-xl bg-slate-100 hover:bg-slate-200 text-[#003399] font-bold text-xs inline-flex items-center justify-center gap-1.5"
-              >
-                {copiedSql ? (
-                  <>
-                    <Check className="w-4 h-4 text-emerald-600" />
-                    <span>SQL Copiato negli Appunti</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-4 h-4" />
-                    <span>Copia Script SQL per Supabase</span>
-                  </>
-                )}
-              </button>
-            </div>
-
-            <div className="flex flex-col gap-2.5 pt-1">
-              <button
-                type="button"
-                disabled={loading}
-                onClick={() => void handleVerifySchemaReady()}
-                className="w-full min-h-[48px] rounded-xl bg-[#FFD100] hover:bg-[#EBC000] text-[#002677] font-extrabold text-sm disabled:opacity-50"
-              >
-                {loading ? 'Controllo database...' : 'Verifica Database e Continua'}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setError(null);
-                  setInfoMessage(null);
-                  setStep('supabase_setup');
-                }}
-                className="w-full min-h-[48px] rounded-xl border border-slate-300 text-slate-700 font-bold text-sm hover:bg-slate-50"
-              >
-                Modifica URL / Key Supabase
-              </button>
-              <button
-                type="button"
-                onClick={onClose}
-                className="w-full min-h-[48px] rounded-xl border border-slate-200 text-slate-500 font-bold text-sm hover:bg-slate-50"
-              >
-                Annulla
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* 3. LOGIN AMMINISTRATORE */}
+        {/* LOGIN AMMINISTRATORE */}
         {step === 'email_password' && (
           <form onSubmit={handleCheckAndLogin} className="space-y-4">
             <div>
@@ -655,7 +418,7 @@ export function AdminAuthModal({
               </div>
             </div>
 
-            <div className="flex items-center justify-between text-xs">
+            <div className="flex items-center justify-start text-xs">
               <button
                 type="button"
                 onClick={() => {
@@ -667,23 +430,12 @@ export function AdminAuthModal({
               >
                 Password dimenticata?
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setError(null);
-                  setInfoMessage(null);
-                  setStep('supabase_setup');
-                }}
-                className="font-semibold text-slate-500 hover:text-slate-800 py-1.5"
-              >
-                Configura Supabase
-              </button>
             </div>
 
             <div className="flex flex-col gap-2.5 pt-1">
               <button
                 type="submit"
-                disabled={loading}
+                disabled={loading || !isSupabaseConfigured()}
                 className="w-full min-h-[48px] rounded-xl bg-[#003399] hover:bg-[#002677] text-white font-bold text-sm disabled:opacity-50"
               >
                 {loading ? 'Accesso e verifica...' : 'Accedi al Pannello Admin'}
@@ -699,7 +451,7 @@ export function AdminAuthModal({
           </form>
         )}
 
-        {/* 4. DIAGNOSTICA TEMPORANEA POST-LOGIN / SESSIONE */}
+        {/* DIAGNOSTICA TEMPORANEA POST-LOGIN / SESSIONE */}
         {step === 'auth_diagnostics' && diagnostics && (
           <div className="space-y-4">
             {diagnostics.email && (
@@ -754,17 +506,6 @@ export function AdminAuthModal({
                   </button>
                   <button
                     type="button"
-                    onClick={() => {
-                      setError(null);
-                      setInfoMessage(null);
-                      setStep('supabase_schema_sql');
-                    }}
-                    className="w-full min-h-[48px] rounded-xl border border-[#003399] text-[#003399] font-bold text-sm hover:bg-blue-50"
-                  >
-                    Mostra Script SQL Supabase
-                  </button>
-                  <button
-                    type="button"
                     onClick={() => void handleSignOutFromDiagnostics()}
                     className="w-full min-h-[48px] rounded-xl border border-red-200 text-red-700 font-bold text-sm hover:bg-red-50 inline-flex items-center justify-center gap-1.5"
                   >
@@ -787,7 +528,7 @@ export function AdminAuthModal({
           </div>
         )}
 
-        {/* 5. CREA PASSWORD (SOLO QUANDO UTENTE NON ESISTE O NON HA CREDENZIALI) / IMPOSTA NUOVA PASSWORD (SOLO DA RECUPERO) */}
+        {/* CREA PASSWORD / IMPOSTA NUOVA PASSWORD */}
         {(step === 'setup_first_password' || step === 'force_change_password') && (
           <form
             onSubmit={
@@ -884,7 +625,7 @@ export function AdminAuthModal({
           </form>
         )}
 
-        {/* 6. RECUPERO PASSWORD */}
+        {/* RECUPERO PASSWORD */}
         {step === 'forgot_password' && (
           <form onSubmit={handleResetPassword} className="space-y-4">
             <div>
@@ -908,7 +649,7 @@ export function AdminAuthModal({
             <div className="flex flex-col gap-2.5 pt-1">
               <button
                 type="submit"
-                disabled={loading}
+                disabled={loading || !isSupabaseConfigured()}
                 className="w-full min-h-[48px] rounded-xl bg-[#003399] hover:bg-[#002677] text-white font-bold text-sm disabled:opacity-50"
               >
                 {loading ? 'Invio...' : 'Invia Email di Recupero'}

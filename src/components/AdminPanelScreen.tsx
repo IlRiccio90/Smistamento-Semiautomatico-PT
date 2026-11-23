@@ -21,7 +21,6 @@ import {
   ShieldCheck,
   Sparkles,
   Trash2,
-  Unplug,
   Upload,
   UserCheck,
   UserPlus,
@@ -35,7 +34,6 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { getLastGlobalSyncAt, getLocalStatsSummary } from '../db/indexedDb';
 import { extractPdfToCenterRecords } from '../engine/pdfExtractor';
-import { clearSupabaseConfig, getSupabaseConfig } from '../lib/supabaseClient';
 import {
   adminCheckDuplicatePdfApi,
   adminCreateBackupApi,
@@ -80,8 +78,6 @@ interface AdminPanelScreenProps {
   onBackHome: () => void;
   onLoggedOut: () => void;
   onCentersChanged: () => Promise<void>;
-  onOpenSupabaseSetup: () => void;
-  onSupabaseDisconnected: () => Promise<void> | void;
 }
 
 type AdminTab = 'centri' | 'pdf' | 'admin' | 'backup' | 'log' | 'diagnostica';
@@ -154,8 +150,6 @@ export function AdminPanelScreen({
   onBackHome,
   onLoggedOut,
   onCentersChanged,
-  onOpenSupabaseSetup,
-  onSupabaseDisconnected,
 }: AdminPanelScreenProps) {
   const [activeTab, setActiveTab] = useState<AdminTab>('centri');
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
@@ -653,13 +647,6 @@ export function AdminPanelScreen({
     } finally {
       setBusyMessage(null);
     }
-  };
-
-  const handleDisconnectSupabase = async () => {
-    clearAlerts();
-    await logoutAdminApi(session.token);
-    await clearSupabaseConfig();
-    await onSupabaseDisconnected();
   };
 
   // ---- BACKUP & RIPRISTINO ----
@@ -1761,50 +1748,6 @@ export function AdminPanelScreen({
                 </div>
               </>
             )}
-
-            {/* Configurazione Supabase persistente (solo Admin) */}
-            {(() => {
-              const sbCfg = getSupabaseConfig();
-              return (
-                <div className="bg-white rounded-2xl border border-slate-200 p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                  <div className="min-w-0">
-                    <h3 className="text-sm font-extrabold text-[#003399] flex items-center gap-2">
-                      <Database className="w-4 h-4 shrink-0" />
-                      <span>Connessione Progetto Supabase</span>
-                    </h3>
-                    <p className="text-xs text-slate-600 mt-1 break-all font-mono">
-                      {sbCfg?.url || 'Non configurato'}
-                    </p>
-                    <p className="text-[11px] text-slate-500 mt-0.5">
-                      Origine:{' '}
-                      {sbCfg?.source === 'env'
-                        ? 'Variabili ambiente server'
-                        : 'Configurazione salvata in modo persistente sul dispositivo'}
-                    </p>
-                  </div>
-                  <div className="flex flex-col sm:flex-row gap-2.5 shrink-0">
-                    <button
-                      type="button"
-                      onClick={onOpenSupabaseSetup}
-                      className="min-h-[44px] px-4 rounded-xl border border-[#003399] text-[#003399] hover:bg-blue-50 text-xs font-extrabold inline-flex items-center justify-center gap-1.5"
-                    >
-                      <KeyRound className="w-4 h-4" />
-                      <span>Modifica Configurazione</span>
-                    </button>
-                    {sbCfg?.source === 'storage' && (
-                      <button
-                        type="button"
-                        onClick={() => void handleDisconnectSupabase()}
-                        className="min-h-[44px] px-4 rounded-xl border border-red-200 text-red-700 hover:bg-red-50 text-xs font-bold inline-flex items-center justify-center gap-1.5"
-                      >
-                        <Unplug className="w-4 h-4" />
-                        <span>Disconnetti</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
-              );
-            })()}
           </section>
         )}
       </main>
