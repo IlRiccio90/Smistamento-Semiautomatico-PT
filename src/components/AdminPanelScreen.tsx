@@ -11,14 +11,17 @@ import {
   FileUp,
   HardDrive,
   History,
+  KeyRound,
   Loader2,
   LogOut,
   Plus,
   RefreshCw,
   RotateCcw,
   Shield,
+  ShieldCheck,
   Sparkles,
   Trash2,
+  Unplug,
   Upload,
   UserCheck,
   UserPlus,
@@ -27,10 +30,12 @@ import {
   Wifi,
   WifiOff,
   X,
+  XCircle,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { getLastGlobalSyncAt, getLocalStatsSummary } from '../db/indexedDb';
 import { extractPdfToCenterRecords } from '../engine/pdfExtractor';
+import { clearSupabaseConfig, getSupabaseConfig } from '../lib/supabaseClient';
 import {
   adminCheckDuplicatePdfApi,
   adminCreateBackupApi,
@@ -49,7 +54,10 @@ import {
   adminToggleUserActiveApi,
   adminUpdateCenterApi,
   adminUploadPdfApi,
+  changeAdminPasswordApi,
   logoutAdminApi,
+  toFriendlyError,
+  verifyAndEnsureAdminAccess,
 } from '../services/cloudApi';
 import type {
   ActivityLogEntry,
@@ -72,6 +80,8 @@ interface AdminPanelScreenProps {
   onBackHome: () => void;
   onLoggedOut: () => void;
   onCentersChanged: () => Promise<void>;
+  onOpenSupabaseSetup: () => void;
+  onSupabaseDisconnected: () => Promise<void> | void;
 }
 
 type AdminTab = 'centri' | 'pdf' | 'admin' | 'backup' | 'log' | 'diagnostica';
@@ -144,6 +154,8 @@ export function AdminPanelScreen({
   onBackHome,
   onLoggedOut,
   onCentersChanged,
+  onOpenSupabaseSetup,
+  onSupabaseDisconnected,
 }: AdminPanelScreenProps) {
   const [activeTab, setActiveTab] = useState<AdminTab>('centri');
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
@@ -170,10 +182,12 @@ export function AdminPanelScreen({
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
   const replaceInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Admin users state
+  // Admin users & cambio password state
   const [adminUsers, setAdminUsers] = useState<AdminUserRecord[]>([]);
   const [newAdminEmail, setNewAdminEmail] = useState('');
-  const [newAdminPassword, setNewAdminPassword] = useState('');
+  const [pwChangeNew, setPwChangeNew] = useState('');
+  const [pwChangeConfirm, setPwChangeConfirm] = useState('');
+  const [pwChangeLoading, setPwChangeLoading] = useState(false);
 
   // Backups state
   const [backups, setBackups] = useState<CenterBackupRecord[]>([]);
@@ -217,7 +231,7 @@ export function AdminPanelScreen({
       const list = await adminListCenterPdfsApi(session.token, selectedPdfCenterId);
       setCenterPdfs(list);
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : 'Errore caricamento PDF.');
+      setErrorBanner(toFriendlyError(err, 'Errore caricamento PDF.').message);
     } finally {
       setLoadingPdfs(false);
     }
@@ -228,7 +242,7 @@ export function AdminPanelScreen({
       const users = await adminListUsersApi(session.token);
       setAdminUsers(users);
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : 'Errore elenco amministratori.');
+      setErrorBanner(toFriendlyError(err, 'Errore elenco amministratori.').message);
     }
   }, [session.token]);
 
@@ -237,7 +251,7 @@ export function AdminPanelScreen({
       const list = await adminListBackupsApi(session.token);
       setBackups(list);
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : 'Errore caricamento backup.');
+      setErrorBanner(toFriendlyError(err, 'Errore caricamento backup.').message);
     }
   }, [session.token]);
 
@@ -246,16 +260,17 @@ export function AdminPanelScreen({
       const list = await adminListLogsApi(session.token);
       setLogs(list);
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : 'Errore caricamento log.');
+      setErrorBanner(toFriendlyError(err, 'Errore caricamento log.').message);
     }
   }, [session.token]);
 
   const loadDiagnostics = useCallback(async () => {
     try {
-      const [cloudDiag, localStats, lastGlobalSyncAt] = await Promise.all([
+      const [cloudDiag, localStats, lastGlobalSyncAt, authCheck] = await Promise.all([
         adminGetDiagnosticsApi(session.token),
         getLocalStatsSummary(),
         getLastGlobalSyncAt(),
+        verifyAndEnsureAdminAccess(),
       ]);
       let browserUsage: number | null = null;
       let browserQuota: number | null = null;
@@ -281,10 +296,11 @@ export function AdminPanelScreen({
         browserStorageUsageBytes: browserUsage,
         browserStorageQuotaBytes: browserQuota,
         lastGlobalSyncAt,
+        authDiagnostics: authCheck.diagnostics,
         centerVersions,
       });
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : 'Errore caricamento diagnostica.');
+      setErrorBanner(toFriendlyError(err, 'Errore caricamento diagnostica.').message);
     }
   }, [cloudCenters, localCenters, session.token]);
 
@@ -352,7 +368,7 @@ export function AdminPanelScreen({
       setShowCenterModal(false);
       await onCentersChanged();
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : 'Operazione Centro fallita.');
+      setErrorBanner(toFriendlyError(err, 'Operazione Centro fallita.').message);
     } finally {
       setBusyMessage(null);
     }
@@ -370,7 +386,7 @@ export function AdminPanelScreen({
       setConfirmDeleteCenter(null);
       await onCentersChanged();
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : 'Eliminazione Centro fallita.');
+      setErrorBanner(toFriendlyError(err, 'Eliminazione Centro fallita.').message);
     } finally {
       setBusyMessage(null);
     }
@@ -478,7 +494,7 @@ export function AdminPanelScreen({
       }
     } catch (err) {
       setErrorBanner(
-        err instanceof Error ? err.message : 'Errore durante elaborazione o caricamento PDF.'
+        toFriendlyError(err, 'Errore durante elaborazione o caricamento PDF.').message
       );
     } finally {
       setExtractionProgress(null);
@@ -522,7 +538,7 @@ export function AdminPanelScreen({
       await Promise.all([onCentersChanged(), loadSelectedCenterPdfs()]);
       setSuccessBanner(`PDF "${pdf.fileName}" rimosso e versione Centro aggiornata.`);
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : 'Errore eliminazione PDF.');
+      setErrorBanner(toFriendlyError(err, 'Errore eliminazione PDF.').message);
     } finally {
       setBusyMessage(null);
     }
@@ -539,7 +555,7 @@ export function AdminPanelScreen({
         `Database rigenerato (${updated.addressCount.toLocaleString('it-IT')} indirizzi univoci · v${updated.version}).`
       );
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : 'Errore rigenerazione DB.');
+      setErrorBanner(toFriendlyError(err, 'Errore rigenerazione DB.').message);
     } finally {
       setBusyMessage(null);
     }
@@ -573,33 +589,53 @@ export function AdminPanelScreen({
     } catch (err) {
       setBusyMessage(null);
       setErrorBanner(
-        err instanceof Error ? err.message : 'Impossibile importare i libretti reali.'
+        toFriendlyError(err, 'Impossibile importare i libretti reali.').message
       );
     }
   };
 
-  // ---- AMMINISTRATORI ----
+  // ---- AMMINISTRATORI & CAMBIO PASSWORD ----
   const handleCreateAdminUser = async (e: FormEvent) => {
     e.preventDefault();
     if (!newAdminEmail.trim()) return;
     clearAlerts();
-    setBusyMessage('Creazione account amministratore...');
+    setBusyMessage('Abilitazione account amministratore...');
     try {
-      await adminCreateUserApi(
-        session.token,
-        newAdminEmail.trim(),
-        newAdminPassword.trim() || undefined
-      );
+      await adminCreateUserApi(session.token, newAdminEmail.trim());
       setNewAdminEmail('');
-      setNewAdminPassword('');
       await loadAdminUsers();
       setSuccessBanner(
-        'Amministratore aggiunto. Al primo accesso dovrà impostare o cambiare la propria password.'
+        'Amministratore abilitato. Al primo accesso gli verrà chiesto di creare la propria password.'
       );
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : 'Errore creazione amministratore.');
+      setErrorBanner(toFriendlyError(err, 'Errore abilitazione amministratore.').message);
     } finally {
       setBusyMessage(null);
+    }
+  };
+
+  const handleChangeOwnPassword = async (e: FormEvent) => {
+    e.preventDefault();
+    clearAlerts();
+    if (pwChangeNew.length < 8) {
+      setErrorBanner('La nuova password deve contenere almeno 8 caratteri.');
+      return;
+    }
+    if (pwChangeNew !== pwChangeConfirm) {
+      setErrorBanner('Le due password non coincidono.');
+      return;
+    }
+
+    setPwChangeLoading(true);
+    try {
+      await changeAdminPasswordApi(session.token, pwChangeNew);
+      setPwChangeNew('');
+      setPwChangeConfirm('');
+      setSuccessBanner('Password amministratore aggiornata con successo.');
+    } catch (err) {
+      setErrorBanner(toFriendlyError(err, 'Impossibile aggiornare la password.').message);
+    } finally {
+      setPwChangeLoading(false);
     }
   };
 
@@ -613,10 +649,17 @@ export function AdminPanelScreen({
         `${user.email} ${!user.active ? 'attivato' : 'disattivato'} correttamente.`
       );
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : 'Operazione non consentita.');
+      setErrorBanner(toFriendlyError(err, 'Operazione non consentita.').message);
     } finally {
       setBusyMessage(null);
     }
+  };
+
+  const handleDisconnectSupabase = async () => {
+    clearAlerts();
+    await logoutAdminApi(session.token);
+    await clearSupabaseConfig();
+    await onSupabaseDisconnected();
   };
 
   // ---- BACKUP & RIPRISTINO ----
@@ -629,7 +672,7 @@ export function AdminPanelScreen({
       setBackups(list);
       setSuccessBanner('Backup manuale creato sul server.');
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : 'Errore creazione backup.');
+      setErrorBanner(toFriendlyError(err, 'Errore creazione backup.').message);
     } finally {
       setBusyMessage(null);
     }
@@ -654,7 +697,7 @@ export function AdminPanelScreen({
       await loadBackups();
       setSuccessBanner('Esportazione JSON completata.');
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : 'Errore esportazione Centro.');
+      setErrorBanner(toFriendlyError(err, 'Errore esportazione Centro.').message);
     } finally {
       setBusyMessage(null);
     }
@@ -668,7 +711,7 @@ export function AdminPanelScreen({
       await Promise.all([onCentersChanged(), loadBackups()]);
       setSuccessBanner(`Centro "${restored.name}" ripristinato alla versione v${restored.version}.`);
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : 'Errore ripristino snapshot.');
+      setErrorBanner(toFriendlyError(err, 'Errore ripristino snapshot.').message);
     } finally {
       setBusyMessage(null);
     }
@@ -679,16 +722,21 @@ export function AdminPanelScreen({
     const file = fileList[0];
     if (restoreJsonInputRef.current) restoreJsonInputRef.current.value = '';
     clearAlerts();
-    setBusyMessage('Importazione e ripristino file JSON...');
+    setBusyMessage('Importazione e ripristino file backup...');
     try {
       const rawText = await file.text();
-      const parsed = JSON.parse(rawText);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(rawText);
+      } catch {
+        throw new Error('Il file selezionato non è un backup valido.');
+      }
       const restored = await adminRestoreBackupApi(session.token, { importedPayload: parsed });
       await Promise.all([onCentersChanged(), loadBackups()]);
       setSuccessBanner(`Centro "${restored.name}" importato e pubblicato (v${restored.version}).`);
     } catch (err) {
       setErrorBanner(
-        err instanceof Error ? err.message : 'File JSON non valido o ripristino fallito.'
+        toFriendlyError(err, 'File di backup non valido o ripristino fallito.').message
       );
     } finally {
       setBusyMessage(null);
@@ -1158,62 +1206,105 @@ export function AdminPanelScreen({
           </section>
         )}
 
-        {/* ==================== 3. AMMINISTRATORI ==================== */}
+        {/* ==================== 3. AMMINISTRATORI & SICUREZZA ==================== */}
         {activeTab === 'admin' && (
           <section className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-            <div className="lg:col-span-5 bg-white rounded-2xl border border-slate-200 p-5">
-              <div className="flex items-center gap-2 mb-3">
-                <UserPlus className="w-5 h-5 text-[#003399]" />
-                <h2 className="text-base font-extrabold text-[#0A1628]">
-                  Aggiungi Nuovo Amministratore
-                </h2>
-              </div>
-              <p className="text-xs text-slate-600 mb-4">
-                La registrazione autonoma è disabilitata. Solo un amministratore attivo può abilitare nuovi account.
-              </p>
+            <div className="lg:col-span-5 space-y-5">
+              <div className="bg-white rounded-2xl border border-slate-200 p-5">
+                <div className="flex items-center gap-2 mb-3">
+                  <UserPlus className="w-5 h-5 text-[#003399]" />
+                  <h2 className="text-base font-extrabold text-[#0A1628]">
+                    Abilita Nuovo Amministratore
+                  </h2>
+                </div>
+                <p className="text-xs text-slate-600 mb-4 leading-relaxed">
+                  La registrazione pubblica è disabilitata. Inserisci l’email del collega da autorizzare: al primo accesso gli verrà chiesto automaticamente di creare la propria password.
+                </p>
 
-              <form onSubmit={handleCreateAdminUser} className="space-y-3.5">
-                <div>
-                  <label
-                    htmlFor="new-adm-email"
-                    className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1"
+                <form onSubmit={handleCreateAdminUser} className="space-y-3.5">
+                  <div>
+                    <label
+                      htmlFor="new-adm-email"
+                      className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1"
+                    >
+                      Email Amministratore
+                    </label>
+                    <input
+                      id="new-adm-email"
+                      type="email"
+                      required
+                      value={newAdminEmail}
+                      onChange={(e) => setNewAdminEmail(e.target.value)}
+                      placeholder="collega@posteitaliane.it"
+                      className="w-full min-h-[46px] px-3.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:border-[#003399]"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    className="w-full min-h-[46px] rounded-xl bg-[#003399] hover:bg-[#002677] text-white font-bold text-sm"
                   >
-                    Email Amministratore
-                  </label>
-                  <input
-                    id="new-adm-email"
-                    type="email"
-                    required
-                    value={newAdminEmail}
-                    onChange={(e) => setNewAdminEmail(e.target.value)}
-                    placeholder="collega@posteitaliane.it"
-                    className="w-full min-h-[46px] px-3.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:border-[#003399]"
-                  />
+                    Abilita Amministratore
+                  </button>
+                </form>
+              </div>
+
+              <div className="bg-white rounded-2xl border border-slate-200 p-5">
+                <div className="flex items-center gap-2 mb-3">
+                  <KeyRound className="w-5 h-5 text-[#003399]" />
+                  <h2 className="text-base font-extrabold text-[#0A1628]">
+                    Cambia la tua Password
+                  </h2>
                 </div>
-                <div>
-                  <label
-                    htmlFor="new-adm-pw"
-                    className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1"
+                <p className="text-xs text-slate-600 mb-4">
+                  Account connesso: <strong className="text-[#0A1628]">{session.email}</strong>
+                </p>
+
+                <form onSubmit={handleChangeOwnPassword} className="space-y-3.5">
+                  <div>
+                    <label
+                      htmlFor="own-pw-new"
+                      className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1"
+                    >
+                      Nuova Password (min. 8 caratteri)
+                    </label>
+                    <input
+                      id="own-pw-new"
+                      type="password"
+                      required
+                      minLength={8}
+                      value={pwChangeNew}
+                      onChange={(e) => setPwChangeNew(e.target.value)}
+                      placeholder="••••••••"
+                      className="w-full min-h-[46px] px-3.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:border-[#003399]"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="own-pw-confirm"
+                      className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1"
+                    >
+                      Conferma Nuova Password
+                    </label>
+                    <input
+                      id="own-pw-confirm"
+                      type="password"
+                      required
+                      minLength={8}
+                      value={pwChangeConfirm}
+                      onChange={(e) => setPwChangeConfirm(e.target.value)}
+                      placeholder="••••••••"
+                      className="w-full min-h-[46px] px-3.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:border-[#003399]"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={pwChangeLoading}
+                    className="w-full min-h-[46px] rounded-xl bg-[#FFD100] hover:bg-[#EBC000] text-[#002677] font-extrabold text-sm disabled:opacity-50"
                   >
-                    Password temporanea (opzionale, min. 8 car.)
-                  </label>
-                  <input
-                    id="new-adm-pw"
-                    type="password"
-                    minLength={8}
-                    value={newAdminPassword}
-                    onChange={(e) => setNewAdminPassword(e.target.value)}
-                    placeholder="Se vuota, la imposterà al primo login"
-                    className="w-full min-h-[46px] px-3.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:border-[#003399]"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  className="w-full min-h-[46px] rounded-xl bg-[#003399] hover:bg-[#002677] text-white font-bold text-sm"
-                >
-                  Crea Account Amministratore
-                </button>
-              </form>
+                    {pwChangeLoading ? 'Aggiornamento...' : 'Aggiorna Password'}
+                  </button>
+                </form>
+              </div>
             </div>
 
             <div className="lg:col-span-7 bg-white rounded-2xl border border-slate-200 overflow-hidden">
@@ -1513,6 +1604,51 @@ export function AdminPanelScreen({
 
             {diagnostics && (
               <>
+                {diagnostics.authDiagnostics && (
+                  <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <h3 className="text-sm font-extrabold text-[#003399] flex items-center gap-2">
+                        <ShieldCheck className="w-4 h-4 shrink-0" />
+                        <span>Diagnostica Autenticazione Admin</span>
+                      </h3>
+                      <span className="text-xs font-semibold text-slate-600">
+                        {diagnostics.authDiagnostics.email}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
+                      {[
+                        { label: 'Utente Auth', ok: diagnostics.authDiagnostics.authUserExists },
+                        { label: 'Email confermata', ok: diagnostics.authDiagnostics.emailConfirmed },
+                        { label: 'Sessione valida', ok: diagnostics.authDiagnostics.validSession },
+                        { label: 'Profilo Admin', ok: diagnostics.authDiagnostics.adminProfileExists },
+                        { label: 'Ruolo Admin', ok: diagnostics.authDiagnostics.hasAdminRole },
+                      ].map((item) => (
+                        <div
+                          key={item.label}
+                          className={`rounded-xl border px-3.5 py-2.5 flex items-center justify-between text-xs ${
+                            item.ok
+                              ? 'bg-emerald-50/70 border-emerald-200 text-emerald-800'
+                              : 'bg-red-50 border-red-200 text-red-800'
+                          }`}
+                        >
+                          <span className="font-bold">{item.label}:</span>
+                          <span className="inline-flex items-center gap-1 font-extrabold">
+                            {item.ok ? (
+                              <>
+                                <CheckCircle2 className="w-3.5 h-3.5" /> SI
+                              </>
+                            ) : (
+                              <>
+                                <XCircle className="w-3.5 h-3.5" /> NO
+                              </>
+                            )}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                   <div className="bg-white rounded-2xl border border-slate-200 p-4">
                     <p className="text-xs font-bold uppercase text-slate-500">Connessione</p>
@@ -1625,6 +1761,50 @@ export function AdminPanelScreen({
                 </div>
               </>
             )}
+
+            {/* Configurazione Supabase persistente (solo Admin) */}
+            {(() => {
+              const sbCfg = getSupabaseConfig();
+              return (
+                <div className="bg-white rounded-2xl border border-slate-200 p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-extrabold text-[#003399] flex items-center gap-2">
+                      <Database className="w-4 h-4 shrink-0" />
+                      <span>Connessione Progetto Supabase</span>
+                    </h3>
+                    <p className="text-xs text-slate-600 mt-1 break-all font-mono">
+                      {sbCfg?.url || 'Non configurato'}
+                    </p>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Origine:{' '}
+                      {sbCfg?.source === 'env'
+                        ? 'Variabili ambiente server'
+                        : 'Configurazione salvata in modo persistente sul dispositivo'}
+                    </p>
+                  </div>
+                  <div className="flex flex-col sm:flex-row gap-2.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={onOpenSupabaseSetup}
+                      className="min-h-[44px] px-4 rounded-xl border border-[#003399] text-[#003399] hover:bg-blue-50 text-xs font-extrabold inline-flex items-center justify-center gap-1.5"
+                    >
+                      <KeyRound className="w-4 h-4" />
+                      <span>Modifica Configurazione</span>
+                    </button>
+                    {sbCfg?.source === 'storage' && (
+                      <button
+                        type="button"
+                        onClick={() => void handleDisconnectSupabase()}
+                        className="min-h-[44px] px-4 rounded-xl border border-red-200 text-red-700 hover:bg-red-50 text-xs font-bold inline-flex items-center justify-center gap-1.5"
+                      >
+                        <Unplug className="w-4 h-4" />
+                        <span>Disconnetti</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
           </section>
         )}
       </main>
@@ -1632,11 +1812,11 @@ export function AdminPanelScreen({
       {/* Modal Creazione/Modifica Centro */}
       {showCenterModal && (
         <div
-          className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-end sm:items-center justify-center sm:p-4"
+          className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs overflow-y-auto flex items-start justify-center p-4 pb-dialog-safe"
           onClick={() => setShowCenterModal(false)}
         >
           <div
-            className="bg-white rounded-t-3xl sm:rounded-3xl w-full max-w-md p-6 pb-operative sm:pb-6 shadow-2xl"
+            className="bg-white rounded-3xl w-full max-w-md p-6 shadow-2xl my-auto max-h-[max(260px,calc(100dvh-272px))] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
@@ -1686,19 +1866,19 @@ export function AdminPanelScreen({
                   className="w-full p-3.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:border-[#003399]"
                 />
               </div>
-              <div className="flex items-center gap-3">
+              <div className="flex flex-col gap-2.5 pt-1">
+                <button
+                  type="submit"
+                  className="w-full min-h-[48px] rounded-xl bg-[#003399] hover:bg-[#002677] text-white font-bold text-sm"
+                >
+                  Salva Centro
+                </button>
                 <button
                   type="button"
                   onClick={() => setShowCenterModal(false)}
-                  className="flex-1 min-h-[48px] rounded-xl border border-slate-300 font-bold text-sm text-slate-700"
+                  className="w-full min-h-[48px] rounded-xl border border-slate-300 font-bold text-sm text-slate-700 hover:bg-slate-50"
                 >
                   Annulla
-                </button>
-                <button
-                  type="submit"
-                  className="flex-1 min-h-[48px] rounded-xl bg-[#003399] hover:bg-[#002677] text-white font-bold text-sm"
-                >
-                  Salva Centro
                 </button>
               </div>
             </form>
@@ -1708,8 +1888,8 @@ export function AdminPanelScreen({
 
       {/* Modal Conferma Eliminazione Centro */}
       {confirmDeleteCenter && (
-        <div className="fixed inset-0 z-50 bg-black/55 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4">
+        <div className="fixed inset-0 z-50 bg-black/55 backdrop-blur-xs overflow-y-auto flex items-start justify-center p-4 pb-dialog-safe">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4 my-auto max-h-[max(260px,calc(100dvh-272px))] overflow-y-auto">
             <div className="flex items-center gap-3 text-red-700">
               <AlertTriangle className="w-6 h-6 shrink-0" />
               <h3 className="text-lg font-extrabold">Elimina Centro di Recapito</h3>
@@ -1717,20 +1897,20 @@ export function AdminPanelScreen({
             <p className="text-sm text-slate-700">
               Stai per eliminare <strong>{confirmDeleteCenter.name}</strong> dal server centrale. Verrà creato automaticamente uno snapshot nella sezione Backup prima della rimozione.
             </p>
-            <div className="flex items-center gap-3">
-              <button
-                type="button"
-                onClick={() => setConfirmDeleteCenter(null)}
-                className="flex-1 min-h-[46px] rounded-xl border border-slate-300 font-bold text-sm"
-              >
-                Annulla
-              </button>
+            <div className="flex flex-col gap-2.5 pt-1">
               <button
                 type="button"
                 onClick={() => void handleConfirmDeleteCenter()}
-                className="flex-1 min-h-[46px] rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-sm"
+                className="w-full min-h-[46px] rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-sm"
               >
                 Elimina Definitivamente
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmDeleteCenter(null)}
+                className="w-full min-h-[46px] rounded-xl border border-slate-300 font-bold text-sm text-slate-700 hover:bg-slate-50"
+              >
+                Annulla
               </button>
             </div>
           </div>
@@ -1739,8 +1919,8 @@ export function AdminPanelScreen({
 
       {/* Modal Controllo Duplicati PDF */}
       {duplicatePrompt && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-end sm:items-center justify-center sm:p-4">
-          <div className="bg-white rounded-t-3xl sm:rounded-3xl max-w-lg w-full p-6 pb-operative sm:pb-6 shadow-2xl space-y-4">
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs overflow-y-auto flex items-start justify-center p-4 pb-dialog-safe">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4 my-auto max-h-[max(260px,calc(100dvh-272px))] overflow-y-auto">
             <div className="flex items-start gap-3">
               <div className="w-11 h-11 rounded-2xl bg-amber-100 text-amber-800 flex items-center justify-center shrink-0">
                 <AlertTriangle className="w-6 h-6" />
@@ -1766,27 +1946,27 @@ export function AdminPanelScreen({
               </p>
             </div>
 
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 pt-2">
+            <div className="flex flex-col gap-2.5 pt-2">
               <button
                 type="button"
-                onClick={() => duplicatePrompt.resolver('cancel')}
-                className="min-h-[46px] px-4 rounded-xl border border-slate-300 font-bold text-xs sm:text-sm text-slate-700"
+                onClick={() => duplicatePrompt.resolver('replace')}
+                className="w-full min-h-[46px] px-4 rounded-xl bg-[#FFD100] hover:bg-[#EBC000] text-[#002677] font-extrabold text-xs sm:text-sm"
               >
-                Annulla
+                Sostituisci
               </button>
               <button
                 type="button"
                 onClick={() => duplicatePrompt.resolver('keep_both')}
-                className="flex-1 min-h-[46px] px-4 rounded-xl bg-white border border-[#003399] text-[#003399] font-extrabold text-xs sm:text-sm"
+                className="w-full min-h-[46px] px-4 rounded-xl bg-white border border-[#003399] text-[#003399] font-extrabold text-xs sm:text-sm hover:bg-blue-50"
               >
                 Mantieni entrambe le versioni
               </button>
               <button
                 type="button"
-                onClick={() => duplicatePrompt.resolver('replace')}
-                className="flex-1 min-h-[46px] px-4 rounded-xl bg-[#FFD100] hover:bg-[#EBC000] text-[#002677] font-extrabold text-xs sm:text-sm"
+                onClick={() => duplicatePrompt.resolver('cancel')}
+                className="w-full min-h-[46px] px-4 rounded-xl border border-slate-300 font-bold text-xs sm:text-sm text-slate-700 hover:bg-slate-50"
               >
-                Sostituisci
+                Annulla
               </button>
             </div>
           </div>

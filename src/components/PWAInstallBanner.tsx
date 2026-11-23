@@ -97,11 +97,11 @@ export function PWAInstallBanner({
 
       {showIOSModal && (
         <div
-          className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-end sm:items-center justify-center p-4"
+          className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm overflow-y-auto flex items-start justify-center p-4 pb-dialog-safe"
           onClick={() => setShowIOSModal(false)}
         >
           <div
-            className="bg-white rounded-3xl w-full max-w-md p-6 pb-operative sm:pb-6 shadow-2xl"
+            className="bg-white rounded-3xl w-full max-w-md p-6 shadow-2xl my-auto max-h-[max(260px,calc(100dvh-272px))] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
@@ -121,6 +121,15 @@ export function PWAInstallBanner({
               <li>2. Scorri e seleziona <strong>Aggiungi alla schermata Home</strong>.</li>
               <li>3. Conferma con <strong>Aggiungi</strong> per avviare l’app offline.</li>
             </ol>
+            <div className="flex flex-col gap-2.5 mt-5">
+              <button
+                type="button"
+                onClick={() => setShowIOSModal(false)}
+                className="w-full min-h-[46px] rounded-xl bg-[#003399] hover:bg-[#002677] text-white font-bold text-sm"
+              >
+                Ho capito
+              </button>
+            </div>
           </div>
         </div>
       )}

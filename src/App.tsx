@@ -18,9 +18,15 @@ import {
 import { invalidateCenterIndex } from './engine/searchEngine';
 import { usePWAInstall } from './hooks/usePWAInstall';
 import {
+  getSupabaseClient,
+  loadPersistentSupabaseConfig,
+} from './lib/supabaseClient';
+import {
   fetchCenterSyncDelta,
   fetchCloudCenters,
+  restoreAdminSessionApi,
   sendSyncAck,
+  toFriendlyError,
 } from './services/cloudApi';
 import type {
   AddressRecord,
@@ -46,9 +52,12 @@ export default function App() {
   const [centerPdfs, setCenterPdfs] = useState<PdfDocumentRecord[]>([]);
   const [centerAddresses, setCenterAddresses] = useState<AddressRecord[]>([]);
 
-  // Sessione Admin mantenuta SOLO in memoria (mai salvata su localStorage/sessionStorage)
   const [adminSession, setAdminSession] = useState<AdminSession | null>(null);
   const [showAdminAuthModal, setShowAdminAuthModal] = useState(false);
+  const [authModalMode, setAuthModalMode] = useState<
+    'auto' | 'supabase_setup' | 'force_change_password'
+  >('auto');
+  const [supabaseRevision, setSupabaseRevision] = useState(0);
   const [aiOcrAvailable, setAiOcrAvailable] = useState(false);
 
   const refreshLocalCenters = useCallback(async () => {
@@ -68,7 +77,7 @@ export default function App() {
       setCloudCenters(list);
       setSyncErrorBanner(null);
     } catch {
-      // In assenza di rete o backend temporaneamente non raggiungibile, usa comunque IndexedDB locale
+      // In assenza di rete o backend non ancora configurato, usa comunque IndexedDB locale
     } finally {
       setLoadingCloud(false);
     }
@@ -81,7 +90,6 @@ export default function App() {
       try {
         await sendSyncAck(item.centerId, item.action, item.version);
       } catch {
-        // Riaccoda se l'invio fallisce nuovamente
         await enqueueSyncAck({
           centerId: item.centerId,
           centerName: item.centerName,
@@ -92,20 +100,86 @@ export default function App() {
     }
   }, []);
 
+  // Avvio: carica configurazione Supabase persistente (env/localStorage/IndexedDB), ripristina sessione e sincronizza
   useEffect(() => {
     void requestPersistentStorage();
     void (async () => {
+      await loadPersistentSupabaseConfig();
+      setSupabaseRevision((r) => r + 1);
+
+      const restored = await restoreAdminSessionApi().catch(() => null);
+      if (restored) {
+        setAdminSession(restored);
+      }
+
       await Promise.all([refreshLocalCenters(), refreshCloudCenters()]);
       await flushBackgroundSyncQueue();
     })();
 
     fetch('/api/health')
-      .then((r) => (r.ok ? r.json() : null))
+      .then(async (r) => {
+        if (!r.ok) return null;
+        const ct = r.headers.get('content-type') || '';
+        if (!ct.includes('application/json')) return null;
+        return r.json();
+      })
       .then((data) => {
         if (data?.aiOcrAvailable) setAiOcrAvailable(true);
       })
       .catch(() => {});
   }, [flushBackgroundSyncQueue, refreshCloudCenters, refreshLocalCenters]);
+
+  // Sottoscrizione ciclo di vita sessione Supabase Auth (login, logout, refresh token, password recovery)
+  useEffect(() => {
+    const sb = getSupabaseClient();
+    if (!sb) return;
+
+    const {
+      data: { subscription },
+    } = sb.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_OUT') {
+        setAdminSession(null);
+        setView((prev) => (prev === 'admin' ? 'home' : prev));
+        return;
+      }
+
+      if (event === 'PASSWORD_RECOVERY') {
+        void (async () => {
+          const restored = await restoreAdminSessionApi().catch(() => null);
+          const recoverySession: AdminSession = restored ?? {
+            token: session?.access_token || '',
+            email: session?.user?.email?.toLowerCase() || 'andrea.graziano90@hotmail.it',
+            role: 'admin',
+            mustChangePassword: true,
+            backendMode: 'supabase',
+          };
+          setAdminSession(recoverySession);
+          setAuthModalMode('force_change_password');
+          setShowAdminAuthModal(true);
+        })();
+        return;
+      }
+
+      if (event === 'TOKEN_REFRESHED' && session?.access_token) {
+        setAdminSession((prev) =>
+          prev ? { ...prev, token: session.access_token } : prev
+        );
+      }
+
+      if (event === 'SIGNED_IN' && session?.access_token) {
+        void (async () => {
+          const restored = await restoreAdminSessionApi().catch(() => null);
+          if (restored) {
+            setAdminSession((prev) => prev ?? restored);
+          }
+        })();
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, [supabaseRevision]);
 
   useEffect(() => {
     if (pwa.isOnline) {
@@ -141,7 +215,6 @@ export default function App() {
       });
     }
 
-    // Eventuali centri sincronizzati in locale quando si è completamente offline (cloudCenters vuoto)
     for (const local of localCenters) {
       if (seenIds.has(local.id)) continue;
       const cloud = cloudMap.get(local.id);
@@ -208,9 +281,7 @@ export default function App() {
         }
       } catch (err) {
         setSyncErrorBanner(
-          err instanceof Error
-            ? err.message
-            : 'Sincronizzazione non riuscita. Verifica la connessione.'
+          toFriendlyError(err, 'Sincronizzazione non riuscita. Verifica la connessione.').message
         );
       } finally {
         setSyncingCenterIds((prev) => {
@@ -241,9 +312,13 @@ export default function App() {
   );
 
   const handleOpenAdmin = () => {
-    if (adminSession) {
+    if (adminSession && !adminSession.mustChangePassword) {
       setView('admin');
+    } else if (adminSession && adminSession.mustChangePassword) {
+      setAuthModalMode('force_change_password');
+      setShowAdminAuthModal(true);
     } else {
+      setAuthModalMode('auto');
       setShowAdminAuthModal(true);
     }
   };
@@ -319,16 +394,37 @@ export default function App() {
             setView('home');
           }}
           onCentersChanged={refreshCloudCenters}
+          onOpenSupabaseSetup={() => {
+            setAuthModalMode('supabase_setup');
+            setShowAdminAuthModal(true);
+          }}
+          onSupabaseDisconnected={() => {
+            setAdminSession(null);
+            setCloudCenters([]);
+            setView('home');
+            setSupabaseRevision((r) => r + 1);
+          }}
         />
       )}
 
       {showAdminAuthModal && (
         <AdminAuthModal
-          onClose={() => setShowAdminAuthModal(false)}
+          initialMode={authModalMode}
+          activeSessionForPasswordChange={adminSession}
+          onClose={() => {
+            setShowAdminAuthModal(false);
+            setAuthModalMode('auto');
+          }}
+          onSupabaseConfigured={async () => {
+            setSupabaseRevision((r) => r + 1);
+            await refreshCloudCenters();
+          }}
           onAuthenticated={(session) => {
             setAdminSession(session);
             setShowAdminAuthModal(false);
+            setAuthModalMode('auto');
             setView('admin');
+            void refreshCloudCenters();
           }}
         />
       )}

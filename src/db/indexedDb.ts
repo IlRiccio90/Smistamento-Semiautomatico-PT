@@ -379,3 +379,19 @@ export async function drainSyncQueue(): Promise<SyncQueueItem[]> {
   }
   return items;
 }
+
+export async function getSyncMetaValue<T extends string | number>(key: string): Promise<T | null> {
+  const db = await getDb();
+  const row = await db.get('syncMeta', key);
+  return row ? (row.value as T) : null;
+}
+
+export async function setSyncMetaValue(key: string, value: string | number): Promise<void> {
+  const db = await getDb();
+  await db.put('syncMeta', { key, value });
+}
+
+export async function deleteSyncMetaValue(key: string): Promise<void> {
+  const db = await getDb();
+  await db.delete('syncMeta', key);
+}

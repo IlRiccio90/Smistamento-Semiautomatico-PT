@@ -192,6 +192,17 @@ export interface CloudSyncDeltaResponse {
   deletedAddressIds: string[];
 }
 
+export interface AdminAuthDiagnostics {
+  email: string;
+  authUserExists: boolean;
+  emailConfirmed: boolean;
+  validSession: boolean;
+  adminProfileExists: boolean;
+  hasAdminRole: boolean;
+  allPassed: boolean;
+  errorMessage?: string;
+}
+
 export interface DiagnosticsSnapshot {
   backendMode: 'supabase' | 'local-cloud';
   cloudCentersCount: number;
@@ -204,6 +215,7 @@ export interface DiagnosticsSnapshot {
   browserStorageUsageBytes: number | null;
   browserStorageQuotaBytes: number | null;
   lastGlobalSyncAt: number | null;
+  authDiagnostics?: AdminAuthDiagnostics;
   centerVersions: Array<{
     centerId: string;
     name: string;

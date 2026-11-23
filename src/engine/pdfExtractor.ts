@@ -347,7 +347,8 @@ async function tryServerAiOcr(
         defaultZone,
       }),
     });
-    if (!resp.ok) return null;
+    const contentType = resp.headers.get('content-type') || '';
+    if (!resp.ok || !contentType.includes('application/json')) return null;
     const data = await resp.json();
     if (!Array.isArray(data?.rows)) return null;
     return data.rows
