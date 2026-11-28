@@ -7,13 +7,23 @@ import {VitePWA} from 'vite-plugin-pwa';
 
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, process.cwd(), '');
-  const supabaseUrl = (env.VITE_SUPABASE_URL || env.SUPABASE_URL || '').trim();
-  const supabaseAnonKey = (env.VITE_SUPABASE_ANON_KEY || env.SUPABASE_ANON_KEY || '').trim();
+  const cleanEnv = (v?: string) => (v || '').trim().replace(/^["']|["']$/g, '');
+
+  const supabaseUrl = cleanEnv(process.env.VITE_SUPABASE_URL || env.VITE_SUPABASE_URL);
+  const supabaseAnonKey = cleanEnv(
+    process.env.VITE_SUPABASE_ANON_KEY || env.VITE_SUPABASE_ANON_KEY
+  );
 
   return {
     define: {
       'import.meta.env.VITE_SUPABASE_URL': JSON.stringify(supabaseUrl),
       'import.meta.env.VITE_SUPABASE_ANON_KEY': JSON.stringify(supabaseAnonKey),
+      __SUPABASE_BUILD_META__: JSON.stringify({
+        urlSource: supabaseUrl ? 'VITE_SUPABASE_URL' : 'none',
+        keySource: supabaseAnonKey ? 'VITE_SUPABASE_ANON_KEY' : 'none',
+        buildMode: mode,
+        builtAt: new Date().toISOString(),
+      }),
     },
     plugins: [
       react(),

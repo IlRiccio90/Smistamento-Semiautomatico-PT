@@ -1,5 +1,5 @@
 import type { PostgrestError, SupabaseClient } from '@supabase/supabase-js';
-import { getSupabaseClient } from '../lib/supabaseClient';
+import { getSupabaseClient, getSupabaseInitError } from '../lib/supabaseClient';
 import type {
   ActivityLogEntry,
   AddressRecord,
@@ -18,7 +18,8 @@ function requireSupabase(): SupabaseClient {
   const sb = getSupabaseClient();
   if (!sb) {
     throw new Error(
-      'Servizio cloud non disponibile su questa build. Contatta il supporto tecnico per verificare la distribuzione dell’app.'
+      getSupabaseInitError() ||
+        'Inizializzazione Supabase fallita: URL o Publishable Key mancanti o non validi nella build.'
     );
   }
   return sb;

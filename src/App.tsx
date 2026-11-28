@@ -5,6 +5,7 @@ import { CenterDetailScreen } from './components/CenterDetailScreen';
 import { HomeScreen, type HomeCenterItem } from './components/HomeScreen';
 import { OperationalModeScreen } from './components/OperationalModeScreen';
 import { PWAInstallBanner } from './components/PWAInstallBanner';
+import { SupabaseInitDiagnosticsView } from './components/SupabaseInitDiagnosticsView';
 import {
   applyCenterSyncDelta,
   drainSyncQueue,
@@ -17,7 +18,11 @@ import {
 } from './db/indexedDb';
 import { invalidateCenterIndex } from './engine/searchEngine';
 import { usePWAInstall } from './hooks/usePWAInstall';
-import { getSupabaseClient } from './lib/supabaseClient';
+import {
+  getSupabaseClient,
+  runSupabaseConnectionDiagnostics,
+  type SupabaseConnectionDiagnostics,
+} from './lib/supabaseClient';
 import {
   fetchCenterSyncDelta,
   fetchCloudCenters,
@@ -33,7 +38,7 @@ import type {
   PdfDocumentRecord,
 } from './types/sorting';
 
-type ActiveView = 'home' | 'archive' | 'operational' | 'admin';
+type ActiveView = 'home' | 'archive' | 'operational' | 'admin' | 'diagnostics';
 
 export default function App() {
   const pwa = usePWAInstall();
@@ -53,6 +58,20 @@ export default function App() {
   const [showAdminAuthModal, setShowAdminAuthModal] = useState(false);
   const [authModalMode, setAuthModalMode] = useState<'auto' | 'force_change_password'>('auto');
   const [aiOcrAvailable, setAiOcrAvailable] = useState(false);
+
+  const [supabaseDiagnostics, setSupabaseDiagnostics] =
+    useState<SupabaseConnectionDiagnostics | null>(null);
+  const [loadingDiagnostics, setLoadingDiagnostics] = useState(false);
+
+  const refreshSupabaseDiagnostics = useCallback(async () => {
+    setLoadingDiagnostics(true);
+    try {
+      const result = await runSupabaseConnectionDiagnostics();
+      setSupabaseDiagnostics(result);
+    } finally {
+      setLoadingDiagnostics(false);
+    }
+  }, []);
 
   const refreshLocalCenters = useCallback(async () => {
     const list = await listCenters();
@@ -94,10 +113,11 @@ export default function App() {
     }
   }, []);
 
-  // Avvio automatico: connessione immediata a Supabase centralizzato, ripristino sessione e sync Centri
+  // Avvio automatico: connessione immediata a Supabase centralizzato, diagnostica init, ripristino sessione e sync Centri
   useEffect(() => {
     void requestPersistentStorage();
     void (async () => {
+      await refreshSupabaseDiagnostics();
       const restored = await restoreAdminSessionApi().catch(() => null);
       if (restored) {
         setAdminSession(restored);
@@ -118,7 +138,12 @@ export default function App() {
         if (data?.aiOcrAvailable) setAiOcrAvailable(true);
       })
       .catch(() => {});
-  }, [flushBackgroundSyncQueue, refreshCloudCenters, refreshLocalCenters]);
+  }, [
+    flushBackgroundSyncQueue,
+    refreshCloudCenters,
+    refreshLocalCenters,
+    refreshSupabaseDiagnostics,
+  ]);
 
   // Sottoscrizione ciclo di vita sessione Supabase Auth (login, logout, refresh token, password recovery)
   useEffect(() => {
@@ -174,10 +199,16 @@ export default function App() {
 
   useEffect(() => {
     if (pwa.isOnline) {
+      void refreshSupabaseDiagnostics();
       void refreshCloudCenters();
       void flushBackgroundSyncQueue();
     }
-  }, [flushBackgroundSyncQueue, pwa.isOnline, refreshCloudCenters]);
+  }, [
+    flushBackgroundSyncQueue,
+    pwa.isOnline,
+    refreshCloudCenters,
+    refreshSupabaseDiagnostics,
+  ]);
 
   const homeItems = useMemo<HomeCenterItem[]>(() => {
     const localMap = new Map(localCenters.map((c) => [c.id, c]));
@@ -344,13 +375,27 @@ export default function App() {
           isOnline={pwa.isOnline}
           adminSession={adminSession}
           syncingCenterIds={syncingCenterIds}
+          supabaseDiagnostics={supabaseDiagnostics}
           onOpenAdmin={handleOpenAdmin}
+          onOpenDiagnostics={() => {
+            void refreshSupabaseDiagnostics();
+            setView('diagnostics');
+          }}
           onRefreshCloud={refreshCloudCenters}
           onSyncCenter={(cid) => runSelectiveSync(cid, false)}
           onUpdateCenter={(cid) => runSelectiveSync(cid, true)}
           onRemoveLocalCenter={handleRemoveLocalCenter}
           onStartVoiceCenter={(cid) => void handleOpenLocalView(cid, 'operational')}
           onInspectLocalArchive={(cid) => void handleOpenLocalView(cid, 'archive')}
+        />
+      )}
+
+      {view === 'diagnostics' && (
+        <SupabaseInitDiagnosticsView
+          diagnostics={supabaseDiagnostics}
+          loading={loadingDiagnostics}
+          onRefresh={refreshSupabaseDiagnostics}
+          onBackHome={() => setView('home')}
         />
       )}
 
@@ -402,6 +447,10 @@ export default function App() {
             setAuthModalMode('auto');
             setView('admin');
             void refreshCloudCenters();
+          }}
+          onOpenDiagnostics={() => {
+            void refreshSupabaseDiagnostics();
+            setView('diagnostics');
           }}
         />
       )}

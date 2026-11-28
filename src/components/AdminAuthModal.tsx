@@ -1,4 +1,5 @@
 import {
+  Activity,
   CheckCircle2,
   KeyRound,
   Loader2,
@@ -10,7 +11,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { isSupabaseConfigured } from '../lib/supabaseClient';
+import { getSupabaseInitError, isSupabaseConfigured } from '../lib/supabaseClient';
 import {
   changeAdminPasswordApi,
   checkAdminEmail,
@@ -28,6 +29,7 @@ interface AdminAuthModalProps {
   activeSessionForPasswordChange?: AdminSession | null;
   onClose: () => void;
   onAuthenticated: (session: AdminSession) => void;
+  onOpenDiagnostics?: () => void;
 }
 
 type AuthStep =
@@ -45,6 +47,7 @@ export function AdminAuthModal({
   activeSessionForPasswordChange = null,
   onClose,
   onAuthenticated,
+  onOpenDiagnostics,
 }: AdminAuthModalProps) {
   const [step, setStep] = useState<AuthStep>(() => {
     if (initialMode === 'force_change_password') {
@@ -73,7 +76,8 @@ export function AdminAuthModal({
   const [error, setError] = useState<string | null>(() =>
     isSupabaseConfigured()
       ? null
-      : 'Servizio cloud temporaneamente non disponibile. Verifica la connessione o contatta l’amministratore di sistema.'
+      : getSupabaseInitError() ||
+        'Configurazione Supabase assente nella build (VITE_SUPABASE_URL o VITE_SUPABASE_ANON_KEY mancanti).'
   );
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
 
@@ -110,6 +114,14 @@ export function AdminAuthModal({
   const detectFirstAdminState = async () => {
     setError(null);
     setInfoMessage(null);
+    if (!isSupabaseConfigured()) {
+      setStep('email_password');
+      setError(
+        getSupabaseInitError() ||
+          'Configurazione Supabase assente nella build (VITE_SUPABASE_URL o VITE_SUPABASE_ANON_KEY mancanti).'
+      );
+      return;
+    }
     setStep('checking');
     try {
       // 1. Se esiste una sessione Supabase valida, NON mostrare MAI "Crea Password"
@@ -132,7 +144,14 @@ export function AdminAuthModal({
       }
     } catch (err) {
       setStep('email_password');
-      setError(toFriendlyError(err, 'Impossibile verificare lo stato del servizio cloud.').message);
+      const initErr = getSupabaseInitError();
+      setError(
+        initErr ||
+          toFriendlyError(
+            err,
+            'Errore durante la verifica dello stato Supabase Auth/DB.'
+          ).message
+      );
     }
   };
 
@@ -356,9 +375,23 @@ export function AdminAuthModal({
         {error && (
           <div
             role="alert"
-            className="mb-4 rounded-xl bg-red-50 border border-red-200 px-3.5 py-2.5 text-xs font-semibold text-red-700"
+            className="mb-4 rounded-xl bg-red-50 border border-red-200 px-3.5 py-2.5 text-xs font-semibold text-red-700 space-y-2"
           >
-            {error}
+            <p className="break-words">{error}</p>
+            {onOpenDiagnostics && (
+              <button
+                type="button"
+                onClick={() => {
+                  clearAutoRedirect();
+                  onClose();
+                  onOpenDiagnostics();
+                }}
+                className="w-full min-h-[38px] px-3 rounded-lg bg-red-700 hover:bg-red-800 text-white font-bold text-xs inline-flex items-center justify-center gap-1.5"
+              >
+                <Activity className="w-3.5 h-3.5" />
+                <span>Apri Diagnostica Inizializzazione Supabase</span>
+              </button>
+            )}
           </div>
         )}
 

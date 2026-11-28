@@ -357,6 +357,15 @@ drop policy if exists "center_backups_admin_only" on public.center_backups;
 create policy "center_backups_admin_only" on public.center_backups
   for all using (public.is_active_admin()) with check (public.is_active_admin());
 
+-- Privilegi espliciti schema e tabelle per PostgREST (anon / authenticated)
+grant usage on schema public to anon, authenticated;
+grant select on public.centers, public.center_pdfs, public.center_addresses to anon, authenticated;
+grant insert, update, delete on public.centers, public.center_pdfs, public.center_addresses to authenticated;
+grant select, insert, update on public.admin_profiles to authenticated;
+grant insert on public.activity_logs to anon, authenticated;
+grant select on public.activity_logs to authenticated;
+grant select, insert, update, delete on public.center_backups to authenticated;
+
 -- ============================================================================
 -- STORAGE BUCKET PER PDF ORIGINALI
 -- ============================================================================

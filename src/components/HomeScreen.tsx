@@ -1,4 +1,6 @@
 import {
+  Activity,
+  AlertTriangle,
   Building2,
   CheckCircle2,
   Clock,
@@ -12,6 +14,7 @@ import {
   Shield,
   Trash2,
 } from 'lucide-react';
+import type { SupabaseConnectionDiagnostics } from '../lib/supabaseClient';
 import type {
   AdminSession,
   CenterSyncStatus,
@@ -32,7 +35,9 @@ interface HomeScreenProps {
   isOnline: boolean;
   adminSession: AdminSession | null;
   syncingCenterIds: Set<string>;
+  supabaseDiagnostics?: SupabaseConnectionDiagnostics | null;
   onOpenAdmin: () => void;
+  onOpenDiagnostics: () => void;
   onRefreshCloud: () => Promise<void>;
   onSyncCenter: (centerId: string) => Promise<void>;
   onUpdateCenter: (centerId: string) => Promise<void>;
@@ -87,7 +92,9 @@ export function HomeScreen({
   isOnline,
   adminSession,
   syncingCenterIds,
+  supabaseDiagnostics,
   onOpenAdmin,
+  onOpenDiagnostics,
   onRefreshCloud,
   onSyncCenter,
   onUpdateCenter,
@@ -99,8 +106,8 @@ export function HomeScreen({
     <div className="min-h-screen flex flex-col">
       {/* Top Bar Poste Italiane con pulsante [ADMIN] in alto a destra */}
       <header className="sticky top-0 z-30 bg-[#003399] text-white border-b-4 border-[#FFD100] pt-safe">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3 min-w-0">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-2 sm:gap-3">
+          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
             <div className="w-10 h-10 rounded-xl bg-[#FFD100] text-[#002677] flex items-center justify-center font-mono font-extrabold text-sm shrink-0">
               PT
             </div>
@@ -116,18 +123,86 @@ export function HomeScreen({
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={onOpenAdmin}
-            className="min-h-[44px] px-3.5 sm:px-4 rounded-xl bg-[#FFD100] hover:bg-[#EBC000] text-[#002677] font-extrabold text-xs sm:text-sm inline-flex items-center gap-1.5 shrink-0 transition-colors active:scale-[0.98]"
-          >
-            <Shield className="w-4 h-4 stroke-[2.5]" />
-            <span>{adminSession ? 'PANNELLO ADMIN' : 'ADMIN'}</span>
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={onOpenDiagnostics}
+              title="Diagnostica Inizializzazione Supabase"
+              aria-label="Diagnostica Inizializzazione Supabase"
+              className={`min-h-[44px] px-2.5 sm:px-3.5 rounded-xl border font-bold text-xs inline-flex items-center gap-1.5 shrink-0 transition-colors active:scale-[0.98] ${
+                supabaseDiagnostics && !supabaseDiagnostics.connected
+                  ? 'bg-red-600 hover:bg-red-700 border-red-300 text-white'
+                  : 'bg-white/10 hover:bg-white/20 border-white/25 text-white'
+              }`}
+            >
+              <Activity className="w-4 h-4 shrink-0" />
+              <span className="hidden sm:inline">Diagnostica</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onOpenAdmin}
+              className="min-h-[44px] px-3 sm:px-4 rounded-xl bg-[#FFD100] hover:bg-[#EBC000] text-[#002677] font-extrabold text-xs sm:text-sm inline-flex items-center gap-1.5 shrink-0 transition-colors active:scale-[0.98]"
+            >
+              <Shield className="w-4 h-4 stroke-[2.5]" />
+              <span>{adminSession ? 'PANNELLO ADMIN' : 'ADMIN'}</span>
+            </button>
+          </div>
         </div>
       </header>
 
       <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 pt-6 pb-operative">
+        {supabaseDiagnostics && !supabaseDiagnostics.connected && (
+          <section
+            role="alert"
+            className="mb-6 rounded-2xl border-2 border-red-300 bg-red-50 p-4 sm:p-5 space-y-3"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-red-900">
+                <AlertTriangle className="w-5 h-5 shrink-0 text-red-700" />
+                <h2 className="text-sm sm:text-base font-extrabold">
+                  Connessione Supabase non riuscita ({supabaseDiagnostics.environment})
+                </h2>
+              </div>
+              <span className="text-xs font-mono font-bold text-red-800 bg-white border border-red-200 rounded-lg px-2.5 py-1 self-start sm:self-auto">
+                URL: {supabaseDiagnostics.urlLoaded ? 'SI' : 'NO'} · Key:{' '}
+                {supabaseDiagnostics.keyLoaded ? 'SI' : 'NO'} · Client:{' '}
+                {supabaseDiagnostics.clientInitialized ? 'SI' : 'NO'} · Connessione:{' '}
+                {supabaseDiagnostics.connected ? 'SI' : 'NO'}
+              </span>
+            </div>
+
+            {supabaseDiagnostics.failureDiagnosis && (
+              <p className="text-xs sm:text-sm font-bold text-red-950 break-words">
+                {supabaseDiagnostics.failureDiagnosis}
+              </p>
+            )}
+
+            {supabaseDiagnostics.errors.length > 0 && (
+              <ul className="space-y-1.5 text-xs sm:text-sm font-semibold text-red-900">
+                {supabaseDiagnostics.errors.map((errMsg, idx) => (
+                  <li
+                    key={`${idx}-${errMsg.slice(0, 20)}`}
+                    className="rounded-xl bg-white border border-red-200 px-3 py-2 break-words font-mono text-[11px] sm:text-xs"
+                  >
+                    {errMsg}
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <div>
+              <button
+                type="button"
+                onClick={onOpenDiagnostics}
+                className="min-h-[42px] px-4 rounded-xl bg-red-700 hover:bg-red-800 text-white font-bold text-xs sm:text-sm inline-flex items-center gap-2"
+              >
+                <Activity className="w-4 h-4" />
+                <span>Apri Schermata Diagnostica Completa</span>
+              </button>
+            </div>
+          </section>
+        )}
         <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-6">
           <div>
             <h2 className="text-xl sm:text-2xl font-extrabold text-[#0A1628] tracking-tight">
