@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   Building2,
+  Bug,
   CheckCircle2,
   Database,
   Download,
@@ -41,6 +42,7 @@ import {
   adminCreateUserApi,
   adminDeleteCenterApi,
   adminDeletePdfApi,
+  adminDownloadPdfBufferApi,
   adminExportCenterApi,
   adminGetDiagnosticsApi,
   adminListBackupsApi,
@@ -48,6 +50,7 @@ import {
   adminListLogsApi,
   adminListUsersApi,
   adminRegenerateCenterDbApi,
+  adminReimportParsedPdfApi,
   adminRestoreBackupApi,
   adminToggleUserActiveApi,
   adminUpdateCenterApi,
@@ -67,6 +70,7 @@ import type {
   DiagnosticsSnapshot,
   ExtractionProgress,
   PdfDocumentRecord,
+  PdfExtractionDebugStats,
 } from '../types/sorting';
 
 interface AdminPanelScreenProps {
@@ -170,11 +174,15 @@ export function AdminPanelScreen({
   const [centerPdfs, setCenterPdfs] = useState<PdfDocumentRecord[]>([]);
   const [loadingPdfs, setLoadingPdfs] = useState(false);
   const [preferAiOcr, setPreferAiOcr] = useState(false);
+  const [debugParserMode, setDebugParserMode] = useState(true);
+  const [lastParserDebug, setLastParserDebug] = useState<PdfExtractionDebugStats | null>(null);
+  const [reimportingPdfId, setReimportingPdfId] = useState<string | null>(null);
   const [extractionProgress, setExtractionProgress] = useState<ExtractionProgress | null>(null);
   const [duplicatePrompt, setDuplicatePrompt] = useState<DuplicatePromptState | null>(null);
   const [replaceTargetPdf, setReplaceTargetPdf] = useState<PdfDocumentRecord | null>(null);
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
   const replaceInputRef = useRef<HTMLInputElement | null>(null);
+  const autoReimportedZona4Ref = useRef<Set<string>>(new Set());
 
   // Admin users & cambio password state
   const [adminUsers, setAdminUsers] = useState<AdminUserRecord[]>([]);
@@ -409,18 +417,20 @@ export function AdminPanelScreen({
     clearAlerts();
     try {
       let uploadedCount = 0;
+      let totalExtractedAddresses = 0;
       for (const item of items) {
-        const { pdfRecord, addresses } = await extractPdfToCenterRecords({
+        const { pdfRecord, addresses, debugStats } = await extractPdfToCenterRecords({
           centerId,
           fileName: item.fileName,
           buffer: item.buffer,
           preferAiOcr,
           onProgress: (p) => setExtractionProgress(p),
         });
+        setLastParserDebug(debugStats);
 
         if (addresses.length === 0) {
           throw new Error(
-            `Nessun indirizzo estratto da "${item.fileName}". Verifica che il PDF contenga l'itinerario di gita.`
+            `Nessun indirizzo estratto da "${item.fileName}". Verifica che il PDF contenga l'itinerario di gita (righe lette: ${debugStats.linesRead}, scartate: ${debugStats.discardedCount}).`
           );
         }
 
@@ -478,12 +488,13 @@ export function AdminPanelScreen({
           replacePdfId,
         });
         uploadedCount++;
+        totalExtractedAddresses += addresses.length;
       }
 
       await Promise.all([onCentersChanged(), loadSelectedCenterPdfs()]);
       if (uploadedCount > 0) {
         setSuccessBanner(
-          `${uploadedCount} ${uploadedCount === 1 ? 'Libretto Gita elaborato' : 'Libretti Gita elaborati'} e salvato sul cloud. Versione Centro incrementata.`
+          `${uploadedCount} ${uploadedCount === 1 ? 'Libretto Gita elaborato' : 'Libretti Gita elaborati'} e salvato sul cloud: ${totalExtractedAddresses.toLocaleString('it-IT')} indirizzi validi estratti. Versione Centro incrementata.`
         );
       }
     } catch (err) {
@@ -554,6 +565,133 @@ export function AdminPanelScreen({
       setBusyMessage(null);
     }
   };
+
+  const handleReimportCloudPdf = useCallback(
+    async (pdf: PdfDocumentRecord, opts?: { isAutoZona4?: boolean }) => {
+      clearAlerts();
+      setReimportingPdfId(pdf.id);
+      setBusyMessage(
+        opts?.isAutoZona4
+          ? `Riesecuzione automatica importazione Zona 4 ("${pdf.fileName}") con ricostruzione righe e pagine...`
+          : `Rielaborazione parser PDF "${pdf.fileName}" dal cloud...`
+      );
+      try {
+        const buffer = await adminDownloadPdfBufferApi(session.token, pdf.storagePath || '');
+        const { pdfRecord, addresses, debugStats } = await extractPdfToCenterRecords({
+          centerId: pdf.centerId,
+          fileName: pdf.fileName,
+          buffer,
+          preferAiOcr,
+          onProgress: (p) => setExtractionProgress(p),
+        });
+        setLastParserDebug(debugStats);
+
+        if (addresses.length === 0) {
+          throw new Error(
+            `Nessun indirizzo valido estratto da "${pdf.fileName}" (righe lette: ${debugStats.linesRead}, scartate: ${debugStats.discardedCount}). Attiva OCR AI o verifica la modalità Debug.`
+          );
+        }
+
+        setExtractionProgress({
+          fileName: pdf.fileName,
+          stage: 'uploading',
+          currentPage: pdfRecord.pageCount,
+          totalPages: pdfRecord.pageCount,
+          extractedSoFar: addresses.length,
+          message: `Aggiornamento cloud Zona ${pdfRecord.zoneNumber} (${addresses.length.toLocaleString('it-IT')} indirizzi)...`,
+        });
+
+        const result = await adminReimportParsedPdfApi(session.token, pdf.centerId, pdf.id, {
+          pdfRecord,
+          addresses,
+        });
+
+        try {
+          if (pdf.zoneNumber === '4' || /zona[\s_-]*4\b/i.test(pdf.fileName)) {
+            localStorage.setItem(`smistamento_zona4_reimported_v2_${pdf.id}`, 'done');
+          }
+        } catch {
+          // ignore storage quota errors
+        }
+
+        setSelectedPdfCenterId(pdf.centerId);
+        await onCentersChanged();
+        const refreshed = await adminListCenterPdfsApi(session.token, pdf.centerId);
+        setCenterPdfs(refreshed);
+
+        setSuccessBanner(
+          opts?.isAutoZona4
+            ? `Importazione Zona 4 rieseguita automaticamente: individuati ${debugStats.validAddressesExtracted.toLocaleString('it-IT')} indirizzi validi (${result.pdf.extractedCount.toLocaleString('it-IT')} univoci salvati · ${debugStats.linesReconstructed} righe ricostruite).`
+            : `PDF "${pdf.fileName}" (Zona ${pdfRecord.zoneNumber}) rielaborato: ${debugStats.validAddressesExtracted.toLocaleString('it-IT')} indirizzi validi estratti (${debugStats.linesReconstructed} righe ricostruite).`
+        );
+      } catch (err) {
+        setErrorBanner(
+          toFriendlyError(
+            err,
+            opts?.isAutoZona4
+              ? 'Riesecuzione automatica Zona 4 non completata.'
+              : 'Errore rielaborazione PDF.'
+          ).message
+        );
+      } finally {
+        setExtractionProgress(null);
+        setBusyMessage(null);
+        setReimportingPdfId(null);
+      }
+    },
+    [onCentersChanged, preferAiOcr, session.token]
+  );
+
+  // Riesecuzione automatica importazione Zona 4 dopo aggiornamento parser multi-riga/pagina
+  useEffect(() => {
+    if (!isOnline || cloudCenters.length === 0 || reimportingPdfId || extractionProgress) {
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      for (const center of cloudCenters) {
+        if (cancelled) return;
+        let pdfs: PdfDocumentRecord[] = [];
+        try {
+          pdfs = await adminListCenterPdfsApi(session.token, center.id);
+        } catch {
+          continue;
+        }
+        const zona4Pdf = pdfs.find(
+          (p) => p.zoneNumber.trim().toUpperCase() === '4' || /zona[\s_-]*4\b/i.test(p.fileName)
+        );
+        if (!zona4Pdf) continue;
+        if (autoReimportedZona4Ref.current.has(zona4Pdf.id)) continue;
+
+        let alreadyDone = false;
+        try {
+          alreadyDone =
+            localStorage.getItem(`smistamento_zona4_reimported_v2_${zona4Pdf.id}`) === 'done';
+        } catch {
+          alreadyDone = false;
+        }
+        if (alreadyDone) continue;
+
+        autoReimportedZona4Ref.current.add(zona4Pdf.id);
+        setSelectedPdfCenterId(center.id);
+        setActiveTab('pdf');
+        await handleReimportCloudPdf(zona4Pdf, { isAutoZona4: true });
+        break;
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    cloudCenters,
+    extractionProgress,
+    handleReimportCloudPdf,
+    isOnline,
+    reimportingPdfId,
+    session.token,
+  ]);
 
   const handleImportSampleCenterToCloud = async () => {
     clearAlerts();
@@ -1082,6 +1220,19 @@ export function AdminPanelScreen({
                         />
                       </label>
                     )}
+
+                    <label className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between gap-2 text-left cursor-pointer">
+                      <span className="text-xs font-semibold text-slate-700 inline-flex items-center gap-1.5">
+                        <Bug className="w-3.5 h-3.5 text-[#003399]" />
+                        Modalità Debug Parser PDF
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={debugParserMode}
+                        onChange={(e) => setDebugParserMode(e.target.checked)}
+                        className="w-5 h-5 accent-[#003399] rounded"
+                      />
+                    </label>
                   </div>
 
                   {extractionProgress && (
@@ -1116,6 +1267,116 @@ export function AdminPanelScreen({
                         />
                       </div>
                       <p className="mt-2 text-xs text-slate-600">{extractionProgress.message}</p>
+                    </div>
+                  )}
+
+                  {debugParserMode && (
+                    <div className="bg-white rounded-2xl border border-[#003399]/25 p-4 space-y-3 shadow-xs">
+                      <div className="flex items-center justify-between gap-2">
+                        <h4 className="text-xs font-extrabold uppercase tracking-wider text-[#003399] inline-flex items-center gap-1.5">
+                          <Bug className="w-4 h-4 shrink-0" />
+                          <span>Debug Parser PDF</span>
+                        </h4>
+                        {lastParserDebug && (
+                          <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded bg-blue-50 text-[#003399] truncate max-w-[160px]">
+                            {lastParserDebug.parserModeUsed}
+                          </span>
+                        )}
+                      </div>
+
+                      {!lastParserDebug ? (
+                        <p className="text-xs text-slate-600 leading-relaxed">
+                          Carica un PDF oppure clicca <strong>Rielabora</strong> su un Libretto esistente (es. Zona 4) per visualizzare righe lette, righe ricostruite, indirizzi validi estratti ed eventuali record scartati.
+                        </p>
+                      ) : (
+                        <>
+                          <p className="text-xs font-bold text-[#0A1628] truncate">
+                            File: {lastParserDebug.fileName}
+                          </p>
+                          <div className="grid grid-cols-2 gap-2 text-xs tabular-nums">
+                            <div className="rounded-xl bg-slate-50 border border-slate-200 p-2.5">
+                              <p className="text-[11px] text-slate-500 font-semibold">
+                                Righe lette
+                              </p>
+                              <p className="text-base font-extrabold text-[#0A1628]">
+                                {lastParserDebug.linesRead.toLocaleString('it-IT')}
+                              </p>
+                            </div>
+                            <div className="rounded-xl bg-blue-50/70 border border-blue-200 p-2.5">
+                              <p className="text-[11px] text-[#003399] font-semibold">
+                                Righe ricostruite
+                              </p>
+                              <p className="text-base font-extrabold text-[#003399]">
+                                {lastParserDebug.linesReconstructed.toLocaleString('it-IT')}
+                              </p>
+                              <p className="text-[10px] text-slate-600 mt-0.5">
+                                {lastParserDebug.multiLineMerges} multi-riga ·{' '}
+                                {lastParserDebug.crossPageMerges} cross-pagina ·{' '}
+                                {lastParserDebug.incompleteComuneMerges} comuni uniti
+                              </p>
+                            </div>
+                            <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-2.5">
+                              <p className="text-[11px] text-emerald-700 font-semibold">
+                                Indirizzi validi estratti
+                              </p>
+                              <p className="text-base font-extrabold text-emerald-800">
+                                {lastParserDebug.validAddressesExtracted.toLocaleString('it-IT')}
+                              </p>
+                            </div>
+                            <div
+                              className={`rounded-xl border p-2.5 ${
+                                lastParserDebug.discardedCount > 0
+                                  ? 'bg-amber-50 border-amber-200'
+                                  : 'bg-slate-50 border-slate-200'
+                              }`}
+                            >
+                              <p className="text-[11px] text-slate-600 font-semibold">
+                                Record scartati
+                              </p>
+                              <p
+                                className={`text-base font-extrabold ${
+                                  lastParserDebug.discardedCount > 0
+                                    ? 'text-amber-800'
+                                    : 'text-[#0A1628]'
+                                }`}
+                              >
+                                {lastParserDebug.discardedCount.toLocaleString('it-IT')}
+                              </p>
+                            </div>
+                          </div>
+
+                          {lastParserDebug.discardedRecords.length > 0 && (
+                            <div className="space-y-1.5">
+                              <p className="text-[11px] font-extrabold uppercase tracking-wider text-amber-800">
+                                Dettaglio record scartati ({lastParserDebug.discardedRecords.length}
+                                {lastParserDebug.discardedCount >
+                                lastParserDebug.discardedRecords.length
+                                  ? ` di ${lastParserDebug.discardedCount}`
+                                  : ''}
+                                )
+                              </p>
+                              <div className="max-h-52 overflow-y-auto divide-y divide-slate-100 rounded-xl border border-amber-200 bg-amber-50/40">
+                                {lastParserDebug.discardedRecords.map((rec, idx) => (
+                                  <div key={`${rec.page}-${idx}`} className="p-2.5 text-[11px] space-y-0.5">
+                                    <div className="flex items-center justify-between gap-2 font-mono font-bold text-slate-700">
+                                      <span>Pag. {rec.page}</span>
+                                      {(rec.subzona || rec.prog) && (
+                                        <span>
+                                          Sub {rec.subzona || '—'} · Prog {rec.prog || '—'}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <p className="font-semibold text-[#0A1628] break-words">
+                                      {rec.rawText}
+                                    </p>
+                                    <p className="text-amber-800">{rec.reason}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1160,24 +1421,37 @@ export function AdminPanelScreen({
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-2 shrink-0">
+                          <div className="flex flex-wrap items-center gap-2 shrink-0">
                             <button
                               type="button"
-                              disabled={Boolean(extractionProgress)}
+                              disabled={Boolean(extractionProgress) || Boolean(reimportingPdfId)}
+                              onClick={() => void handleReimportCloudPdf(pdf)}
+                              className="min-h-[42px] px-3 rounded-xl bg-[#003399]/10 border border-[#003399]/30 hover:bg-[#003399]/15 disabled:opacity-50 text-xs font-bold text-[#003399] inline-flex items-center gap-1.5"
+                            >
+                              {reimportingPdfId === pdf.id ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <RotateCcw className="w-3.5 h-3.5" />
+                              )}
+                              <span>Rielabora</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={Boolean(extractionProgress) || Boolean(reimportingPdfId)}
                               onClick={() => {
                                 setReplaceTargetPdf(pdf);
                                 replaceInputRef.current?.click();
                               }}
-                              className="min-h-[42px] px-3 rounded-xl border border-slate-200 hover:bg-slate-100 text-xs font-bold text-[#003399] inline-flex items-center gap-1.5"
+                              className="min-h-[42px] px-3 rounded-xl border border-slate-200 hover:bg-slate-100 disabled:opacity-50 text-xs font-bold text-[#003399] inline-flex items-center gap-1.5"
                             >
                               <RefreshCw className="w-3.5 h-3.5" />
                               <span>Sostituisci</span>
                             </button>
                             <button
                               type="button"
-                              disabled={Boolean(extractionProgress)}
+                              disabled={Boolean(extractionProgress) || Boolean(reimportingPdfId)}
                               onClick={() => void handleDeletePdf(pdf)}
-                              className="min-h-[42px] min-w-[42px] rounded-xl border border-slate-200 hover:border-red-300 hover:bg-red-50 text-red-600 flex items-center justify-center"
+                              className="min-h-[42px] min-w-[42px] rounded-xl border border-slate-200 hover:border-red-300 hover:bg-red-50 disabled:opacity-50 text-red-600 flex items-center justify-center"
                               aria-label={`Elimina ${pdf.fileName}`}
                             >
                               <Trash2 className="w-4 h-4" />

@@ -1339,6 +1339,119 @@ export async function adminRegenerateCenterDbApi(
   return updated;
 }
 
+export async function adminDownloadPdfBufferApi(
+  _token: string,
+  storagePath: string
+): Promise<ArrayBuffer> {
+  const sb = requireSupabase();
+  if (!storagePath) {
+    throw new Error('Percorso Storage PDF non disponibile per questo Libretto.');
+  }
+  const { data, error } = await sb.storage.from('libretti-pdf').download(storagePath);
+  if (error || !data) {
+    throw new Error(
+      error?.message
+        ? `Impossibile scaricare il PDF dallo Storage (${error.message}). Usa "Sostituisci" per ricaricare il file.`
+        : 'File PDF originale non presente nello Storage cloud. Usa "Sostituisci" per ricaricare il file.'
+    );
+  }
+  return await data.arrayBuffer();
+}
+
+export async function adminReimportParsedPdfApi(
+  _token: string,
+  centerId: string,
+  existingPdfId: string,
+  payload: {
+    pdfRecord: PdfDocumentRecord;
+    addresses: AddressRecord[];
+  }
+): Promise<{ center: DeliveryCenter; pdf: PdfDocumentRecord }> {
+  const sb = requireSupabase();
+  const actorEmail = await getCurrentAdminEmail(sb);
+
+  const { data: cRow, error: cErr } = await sb
+    .from('centers')
+    .select('version')
+    .eq('id', centerId)
+    .single();
+  throwIfPgError(cErr, 'Centro non trovato.');
+
+  const nextVersion = Number((cRow as Record<string, unknown>).version ?? 1) + 1;
+
+  // Deduplica rispetto agli ALTRI PDF attivi del Centro (escludendo il PDF corrente che stiamo reimportando)
+  const existingRows = await fetchAllCenterAddresses(sb, centerId, 0);
+  const seenSig = new Set(
+    existingRows
+      .filter((a) => String(a.pdf_id) !== existingPdfId)
+      .map(
+        (a) =>
+          `${a.comune_norm}|${a.nome_strada_norm}|${String(a.civico_raw || '').toUpperCase()}|${a.zona}|${a.subzona}`
+      )
+  );
+
+  const uniqueNewAddresses: AddressRecord[] = [];
+  for (const addr of payload.addresses) {
+    const sig = `${addr.comuneNorm}|${addr.nomeStradaNorm}|${(addr.civicoRaw || '').toUpperCase()}|${addr.zona}|${addr.subzona}`;
+    if (seenSig.has(sig)) continue;
+    seenSig.add(sig);
+    uniqueNewAddresses.push({
+      ...addr,
+      centerId,
+      pdfId: existingPdfId,
+      versionChanged: nextVersion,
+    });
+  }
+
+  // Segna come eliminati i vecchi record estratti da questo PDF prima di inserire i record ricostruiti
+  const { error: delOldErr } = await sb
+    .from('center_addresses')
+    .update({ deleted: true, version_changed: nextVersion })
+    .eq('pdf_id', existingPdfId)
+    .eq('deleted', false);
+  throwIfPgError(delOldErr, 'Errore pulizia vecchi indirizzi prima della reimportazione.');
+
+  const BATCH = 500;
+  for (let i = 0; i < uniqueNewAddresses.length; i += BATCH) {
+    const chunk = uniqueNewAddresses.slice(i, i + BATCH).map((a) => addressToDbRow(a, nextVersion));
+    const { error: aErr } = await sb.from('center_addresses').insert(chunk);
+    throwIfPgError(aErr, 'Errore salvataggio indirizzi reimportati.');
+  }
+
+  const { data: updatedPdfRow, error: pErr } = await sb
+    .from('center_pdfs')
+    .update({
+      zone_number: payload.pdfRecord.zoneNumber,
+      frazionario: payload.pdfRecord.frazionario ?? null,
+      file_hash: payload.pdfRecord.fileHash || '',
+      page_count: payload.pdfRecord.pageCount,
+      extracted_count: uniqueNewAddresses.length,
+      extraction_method: payload.pdfRecord.extractionMethod,
+      version_added: nextVersion,
+      deleted: false,
+    })
+    .eq('id', existingPdfId)
+    .select('*')
+    .single();
+  throwIfPgError(pErr, 'Errore aggiornamento metadati PDF reimportato.');
+
+  const updatedCenter = await recomputeCloudCenterStats(sb, centerId, true);
+
+  await insertLog(sb, {
+    actorEmail,
+    actorRole: 'admin',
+    action: 'rigenerazione_db',
+    centerId,
+    centerName: updatedCenter.name,
+    details: `Reimportazione parser PDF "${payload.pdfRecord.fileName}" (Zona ${payload.pdfRecord.zoneNumber}): ${uniqueNewAddresses.length} indirizzi validi estratti`,
+  });
+
+  return {
+    center: updatedCenter,
+    pdf: mapPdfRow(updatedPdfRow as Record<string, unknown>),
+  };
+}
+
 // ============================================================================
 // ADMIN USERS, LOGS, BACKUPS, DIAGNOSTICS
 // ============================================================================

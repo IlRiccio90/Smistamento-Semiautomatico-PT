@@ -448,6 +448,21 @@ export function parseAddressString(rawAddress: string, hintComune = ''): ParsedA
         frazione = parts.slice(2, -1).join(', ');
       }
     }
+  } else if (!comune) {
+    // Caso senza virgola: es. "VIA PAPA GIOVANNI PAOLO I 15 CASTIRAGA VIDARDO"
+    // oppure "VIA PRIMO MAGGIO 12 CASTIRAGA VIDARDO"
+    const noCommaMatch = cleanedRaw.match(
+      /^(.+?\s+(?:S\.?\s*N\.?\s*C\.?(?:\s+\d{1,4}[A-Z]?)?|\d{1,4}(?:\s*-\s*\d{1,4}|\s*\/\s*[A-Z0-9]{1,3}|[A-Z]{1,2})?(?:\s+(?:BIS|TER|QUATER|SOLO\s+PARI|SOLO\s+DISPARI|PARI|DISPARI))?))\s+([A-ZÀÈÉÌÒÙ'][A-ZÀÈÉÌÒÙ'\s-]{2,42})$/i
+    );
+    if (noCommaMatch) {
+      const candidateComune = noCommaMatch[2].trim();
+      const nonComuneTrailingWords =
+        /^(?:GENNAIO|FEBBRAIO|MARZO|APRILE|MAGGIO|GIUGNO|LUGLIO|AGOSTO|SETTEMBRE|OTTOBRE|NOVEMBRE|DICEMBRE|BIS|TER|QUATER|PARI|DISPARI|SOLO\s+PARI|SOLO\s+DISPARI|SCALA\s+[A-Z0-9]+)$/i;
+      if (!nonComuneTrailingWords.test(candidateComune)) {
+        streetAndCivicoPart = noCommaMatch[1].trim();
+        comune = candidateComune;
+      }
+    }
   }
 
   // Rimuove eventuale CAP davanti al comune (es. "26866 SANT'ANGELO LODIGIANO") e trattini spuri

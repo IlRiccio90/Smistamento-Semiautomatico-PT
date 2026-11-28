@@ -25,6 +25,27 @@ export interface DeliveryCenter {
 
 export type PdfExtractionMethod = 'native' | 'ocr' | 'hybrid' | 'ai';
 
+export interface PdfDiscardedRecord {
+  page: number;
+  subzona?: string;
+  prog?: string;
+  rawText: string;
+  reason: string;
+}
+
+export interface PdfExtractionDebugStats {
+  fileName: string;
+  linesRead: number;
+  linesReconstructed: number;
+  multiLineMerges: number;
+  crossPageMerges: number;
+  incompleteComuneMerges: number;
+  validAddressesExtracted: number;
+  discardedCount: number;
+  discardedRecords: PdfDiscardedRecord[];
+  parserModeUsed: 'poste-table' | 'generic-multiline' | 'ocr' | 'mixed';
+}
+
 export interface PdfDocumentRecord {
   id: string;
   centerId: string;
